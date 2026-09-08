@@ -1,0 +1,97 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  STUDENT
+  DRIVER
+  ADMIN
+}
+
+enum DriverStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum BookingStatus {
+  RESERVED
+  BOARDED
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id           String        @id @default(cuid())
+  name         String?
+  email        String        @unique
+  phone        String?       @unique
+  pin          String?
+  role         Role          @default(STUDENT)
+  driverStatus DriverStatus? @default(PENDING)
+  registerNum  String?
+  createdAt    DateTime      @default(now())
+
+  // Relations
+  bookings Booking[] @relation("StudentBookings")
+  vehicle  Vehicle?
+}
+
+model Location {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  latitude  Float
+  longitude Float
+  createdAt DateTime @default(now())
+
+  // Relations
+  pickupBookings Booking[] @relation("PickupLocation")
+  dropBookings   Booking[] @relation("DropLocation")
+}
+
+model Vehicle {
+  id             String    @id @default(cuid())
+  vehicleNumber  String    @unique
+  driverId       String    @unique
+  driver         User      @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  capacity       Int       @default(9)
+  availableSeats Int       @default(9)
+  currentLat     Float?
+  currentLng     Float?
+  lastGpsUpdate  DateTime?
+  qrCodeUrl      String?
+  isOnline       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations
+  bookings Booking[]
+}
+
+model Booking {
+  id            String        @id @default(cuid())
+  studentId     String
+  student       User          @relation("StudentBookings", fields: [studentId], references: [id], onDelete: Cascade)
+  vehicleId     String
+  vehicle       Vehicle       @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  pickupId      String
+  pickup        Location      @relation("PickupLocation", fields: [pickupId], references: [id])
+  dropId        String
+  drop          Location      @relation("DropLocation", fields: [dropId], references: [id])
+  seatsBooked   Int           @default(1)
+  fareAmount    Float
+  paymentMethod String        @default("CASH_OR_DRIVER_UPI")
+  paymentStatus String        @default("PENDING_COLLECTION")
+  status        BookingStatus @default(RESERVED)
+  createdAt     DateTime      @default(now())
+  boardedAt     DateTime?
+  completedAt   DateTime?
+}
