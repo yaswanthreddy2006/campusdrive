@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { useSession, signIn, signOut } from 'next-auth/react'
 import {
@@ -97,7 +97,7 @@ export default function AdminDashboardPage() {
   const userEmail = session?.user?.email?.toLowerCase().trim()
   const isAdmin = userEmail === 'yaswanthputluru@gmail.com' || session?.user?.role === 'ADMIN'
 
-  async function fetchAdminData() {
+  const fetchAdminData = useCallback(async () => {
     if (!isAdmin) return
     try {
       setRefreshing(true)
@@ -121,7 +121,7 @@ export default function AdminDashboardPage() {
     } finally {
       setRefreshing(false)
     }
-  }
+  }, [isAdmin])
 
   async function handleVerifyDriver(driverId: string, action: 'APPROVE' | 'REJECT') {
     try {
@@ -149,7 +149,7 @@ export default function AdminDashboardPage() {
       const interval = setInterval(fetchAdminData, 10000)
       return () => clearInterval(interval)
     }
-  }, [isAdmin])
+  }, [isAdmin, fetchAdminData])
 
   const filteredLogs = rideLogs.filter(
     (log) =>

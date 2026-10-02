@@ -37,7 +37,7 @@ export async function POST(req: Request) {
       where: { id: driverId },
       data: {
         driverStatus: targetStatus,
-      } as any,
+      },
       include: {
         vehicle: true,
       },

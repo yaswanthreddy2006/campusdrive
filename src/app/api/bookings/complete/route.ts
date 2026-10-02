@@ -39,6 +39,11 @@ export async function POST(req: Request) {
           pickup: true,
           drop: true,
           student: true,
+          vehicle: {
+            include: {
+              driver: true,
+            },
+          },
         },
       })
 
@@ -63,6 +68,15 @@ export async function POST(req: Request) {
 
       return { booking: updatedBooking, vehicle: updatedVehicle }
     }, { timeout: 10000 })
+
+    // Instant real-time broadcast to student and driver!
+    const { broadcastRealtimeEvent } = await import('@/lib/realtime')
+    broadcastRealtimeEvent(`student_${result.booking.studentId}`, 'booking_updated', result.booking)
+    broadcastRealtimeEvent(`vehicle_${result.vehicle.id}`, 'booking_updated', result.booking)
+    broadcastRealtimeEvent('shuttles_gps', 'seats_updated', {
+      vehicleId: result.vehicle.id,
+      availableSeats: result.vehicle.availableSeats,
+    })
 
     return NextResponse.json({
       success: true,

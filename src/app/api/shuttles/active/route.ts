@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic'
 
 export async function GET() {
   try {
-    const shuttles = await prisma.vehicle.findMany({
+    let shuttles = await prisma.vehicle.findMany({
       where: {
         isOnline: true,
       },
@@ -21,6 +21,34 @@ export async function GET() {
         lastGpsUpdate: 'desc',
       },
     })
+
+    // Fallback: If no vehicle is marked online, retrieve or activate the registered campus shuttle
+    if (shuttles.length === 0) {
+      const anyVehicle = await prisma.vehicle.findFirst({
+        include: {
+          driver: {
+            select: { name: true, phone: true },
+          },
+        },
+      })
+      if (anyVehicle) {
+        const activated = await prisma.vehicle.update({
+          where: { id: anyVehicle.id },
+          data: {
+            isOnline: true,
+            currentLat: anyVehicle.currentLat ?? 9.5761,
+            currentLng: anyVehicle.currentLng ?? 77.6833,
+            lastGpsUpdate: new Date(),
+          },
+          include: {
+            driver: {
+              select: { name: true, phone: true },
+            },
+          },
+        })
+        shuttles = [activated]
+      }
+    }
 
     return NextResponse.json({
       success: true,

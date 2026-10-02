@@ -45,7 +45,7 @@ export async function POST(req: Request) {
               isOnline: true,
             },
           },
-        } as any,
+        },
         include: {
           vehicle: true,
         },
@@ -72,7 +72,7 @@ export async function POST(req: Request) {
               isOnline: false,
             },
           },
-        } as any,
+        },
         include: {
           vehicle: true,
         },

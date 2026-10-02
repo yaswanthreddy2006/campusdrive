@@ -98,6 +98,11 @@ export async function POST(req: Request) {
       },
     })
 
+    // Instant real-time broadcast to student map and driver dashboards!
+    const { broadcastRealtimeEvent } = await import('@/lib/realtime')
+    broadcastRealtimeEvent('shuttles_gps', 'shuttle_moved', updatedVehicle)
+    broadcastRealtimeEvent(`vehicle_${updatedVehicle.id}`, 'shuttle_moved', updatedVehicle)
+
     return NextResponse.json({
       success: true,
       message: 'Driver location and duty status updated successfully.',

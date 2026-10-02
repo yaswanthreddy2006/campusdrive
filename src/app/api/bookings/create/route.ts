@@ -2,6 +2,10 @@ import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/authOptions'
 import prisma from '@/lib/prisma'
+import { BookingStatus } from '@prisma/client'
+import { broadcastRealtimeEvent } from '@/lib/realtime'
+
+export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request) {
   try {
@@ -33,7 +37,7 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json()
-    const { pickupId, dropId, seatsBooked = 1 } = body
+    const { pickupId, dropId, seatsBooked = 1, vehicleId: requestedVehicleId } = body
 
     if (!pickupId || !dropId) {
       return NextResponse.json(
@@ -59,60 +63,75 @@ export async function POST(req: Request) {
 
     // Perform atomic seat reservation using Prisma transaction
     const bookingResult = await prisma.$transaction(async (tx) => {
-      // 1. Query online vehicle on duty with sufficient available seats
-      let vehicle = await tx.vehicle.findFirst({
-        where: {
-          isOnline: true,
-          availableSeats: {
-            gte: numSeats,
-          },
-        },
-        orderBy: {
-          availableSeats: 'desc',
-        },
-      })
+      let vehicle = null
 
-      // If no online vehicle found in DB, seed/retrieve active demo vehicle
-      if (!vehicle) {
-        let defaultDriver = await tx.user.findFirst({
-          where: { role: 'DRIVER' },
-          include: { vehicle: true },
+      // If student picked a specific vehicle/driver, prioritize it
+      if (requestedVehicleId) {
+        vehicle = await tx.vehicle.findUnique({
+          where: { id: requestedVehicleId },
+          include: { driver: true },
         })
-
-        if (!defaultDriver) {
-          defaultDriver = await tx.user.create({
-            data: {
-              name: 'Selvam (KARE Shuttle Driver)',
-              email: 'driver.selvam@klu.ac.in',
-              phone: '9876543210',
-              pin: '1234',
-              role: 'DRIVER',
-              vehicle: {
-                create: {
-                  vehicleNumber: 'TN-58-KARE-01',
-                  capacity: 9,
-                  availableSeats: 9,
-                  isOnline: true,
-                },
-              },
-            },
-            include: { vehicle: true },
-          })
-        }
-
-        if (defaultDriver.vehicle) {
-          vehicle = await tx.vehicle.update({
-            where: { id: defaultDriver.vehicle.id },
-            data: {
-              isOnline: true,
-              availableSeats: Math.max(defaultDriver.vehicle.availableSeats, numSeats),
-            },
-          })
-        }
       }
 
+      // If no specific vehicle requested or vehicle not found, query online vehicle with seats
       if (!vehicle || vehicle.availableSeats < numSeats) {
-        throw new Error('No available seats found on active campus shuttles.')
+        vehicle = await tx.vehicle.findFirst({
+          where: {
+            isOnline: true,
+            availableSeats: {
+              gte: numSeats,
+            },
+          },
+          include: { driver: true },
+          orderBy: {
+            availableSeats: 'desc',
+          },
+        })
+      }
+
+      // Fallback: query any active vehicle in system
+      if (!vehicle) {
+        vehicle = await tx.vehicle.findFirst({
+          where: {
+            availableSeats: {
+              gte: numSeats,
+            },
+          },
+          include: { driver: true },
+          orderBy: {
+            availableSeats: 'desc',
+          },
+        })
+      }
+
+      // If still no vehicle found, fallback to first vehicle in DB
+      if (!vehicle) {
+        vehicle = await tx.vehicle.findFirst({
+          include: { driver: true },
+        })
+      }
+
+      if (!vehicle) {
+        throw new Error('No available shuttle vehicles registered in system.')
+      }
+
+      // Ensure vehicle is online and driver is approved (only update if not already set to save DB trips)
+      if (vehicle.driver && vehicle.driver.driverStatus !== 'APPROVED') {
+        await tx.user.update({
+          where: { id: vehicle.driver.id },
+          data: { driverStatus: 'APPROVED' },
+        })
+      }
+
+      if (!vehicle.isOnline) {
+        await tx.vehicle.update({
+          where: { id: vehicle.id },
+          data: { isOnline: true },
+        })
+      }
+
+      if (vehicle.availableSeats < numSeats) {
+        throw new Error(`Shuttle ${vehicle.vehicleNumber} only has ${vehicle.availableSeats} seat(s) available.`)
       }
 
       // 2. Atomic Decrement of availableSeats to prevent race conditions
@@ -141,9 +160,16 @@ export async function POST(req: Request) {
           fareAmount,
           paymentMethod: 'CASH_OR_DRIVER_UPI',
           paymentStatus: 'PENDING_COLLECTION',
-          status: 'RESERVED',
+          status: BookingStatus.REQUESTED,
         },
         include: {
+          student: {
+            select: {
+              name: true,
+              email: true,
+              phone: true,
+            },
+          },
           pickup: true,
           drop: true,
           vehicle: {
@@ -156,12 +182,20 @@ export async function POST(req: Request) {
 
       const qrCodeData = `KARE-SHUTTLE-BOOKING:${booking.id}:${studentId}:${numSeats}:${fareAmount}`
 
-      return { booking, qrCodeData }
+      return { booking, qrCodeData, remainingSeats: updatedVehicle.availableSeats }
     }, { timeout: 10000 })
+
+    // Instant real-time push to the driver and student channels!
+    broadcastRealtimeEvent(`vehicle_${bookingResult.booking.vehicleId}`, 'booking_created', bookingResult.booking)
+    broadcastRealtimeEvent(`student_${studentId}`, 'booking_created', bookingResult.booking)
+    broadcastRealtimeEvent('shuttles_gps', 'seats_updated', {
+      vehicleId: bookingResult.booking.vehicleId,
+      availableSeats: bookingResult.remainingSeats,
+    })
 
     return NextResponse.json({
       success: true,
-      message: 'Shuttle seat reserved successfully!',
+      message: 'Shuttle seat requested! Notification sent to driver for approval.',
       booking: bookingResult.booking,
       qrCodeData: bookingResult.qrCodeData,
     })

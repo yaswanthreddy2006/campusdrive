@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useSession, signOut } from 'next-auth/react'
 import Link from 'next/link'
 import dynamic from 'next/dynamic'
@@ -20,6 +20,10 @@ import {
   ChevronDown,
   Camera,
   X,
+  Crosshair,
+  Phone,
+  PhoneCall,
+  Navigation,
 } from 'lucide-react'
 import { ShuttleItem } from '@/components/DriverMap'
 
@@ -44,14 +48,28 @@ interface BookingItem {
   createdAt: string
   pickup: LocationItem
   drop: LocationItem
-  vehicle: {
-    id: string
-    vehicleNumber: string
-    driver: {
-      name: string
-      phone: string
-    }
-  }
+  vehicle?: {
+    id?: string
+    vehicleNumber?: string
+    driver?: {
+      name?: string | null
+      phone?: string | null
+    } | null
+  } | null
+}
+
+// Calculate distance in meters between two GPS coordinates using Haversine formula
+function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const R = 6371e3
+  const φ1 = (lat1 * Math.PI) / 180
+  const φ2 = (lat2 * Math.PI) / 180
+  const Δφ = ((lat2 - lat1) * Math.PI) / 180
+  const Δλ = ((lon2 - lon1) * Math.PI) / 180
+  const a =
+    Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2)
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  return Math.round(R * c)
 }
 
 export default function StudentDashboardPage() {
@@ -75,6 +93,74 @@ export default function StudentDashboardPage() {
   const [boardingConfirmedMsg, setBoardingConfirmedMsg] = useState<string | null>(null)
 
   const [activeShuttles, setActiveShuttles] = useState<ShuttleItem[]>([])
+  const [selectedDriverVehicleId, setSelectedDriverVehicleId] = useState<string | null>(null)
+
+  // Student GPS Location State
+  const [studentLocation, setStudentLocation] = useState<{
+    lat: number
+    lng: number
+    accuracy?: number
+  } | null>(null)
+  const [locationPermissionPrompt, setLocationPermissionPrompt] = useState(false)
+  const [locatingStudent, setLocatingStudent] = useState(false)
+
+  // Request Student Real Device GPS
+  const requestStudentLocation = useCallback(() => {
+    if (typeof window === 'undefined' || !navigator.geolocation) return
+    setLocatingStudent(true)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const coords = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+        }
+        setStudentLocation(coords)
+        setLocatingStudent(false)
+        setLocationPermissionPrompt(false)
+
+        // Automatically select the nearest campus stop as pickup
+        if (locations.length > 0) {
+          let closestStop = locations[0]
+          let minDistance = Infinity
+          locations.forEach((loc) => {
+            const dist = Math.hypot(loc.latitude - coords.lat, loc.longitude - coords.lng)
+            if (dist < minDistance) {
+              minDistance = dist
+              closestStop = loc
+            }
+          })
+          if (closestStop) {
+            setPickupId(closestStop.id)
+          }
+        }
+      },
+      (err) => {
+        console.warn('Student GPS lookup notice:', err.message)
+        setLocatingStudent(false)
+        setLocationPermissionPrompt(true)
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 15000 }
+    )
+  }, [locations])
+
+  // Check geolocation permission on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'permissions' in navigator) {
+      navigator.permissions
+        .query({ name: 'geolocation' })
+        .then((perm) => {
+          if (perm.state === 'granted') {
+            requestStudentLocation()
+          } else {
+            setLocationPermissionPrompt(true)
+          }
+        })
+        .catch(() => setLocationPermissionPrompt(true))
+    } else {
+      setLocationPermissionPrompt(true)
+    }
+  }, [requestStudentLocation])
 
   // Fetch campus locations
   useEffect(() => {
@@ -84,9 +170,11 @@ export default function StudentDashboardPage() {
         const data = await res.json()
         if (data.locations && data.locations.length > 0) {
           setLocations(data.locations)
-          setPickupId(data.locations[0].id)
-          if (data.locations.length > 1) {
-            setDropId(data.locations[1].id)
+          const mainGate = data.locations.find((l: LocationItem) => l.name === 'Main Gate')
+          const defaultDrop = data.locations.find((l: LocationItem) => l.name === 'Library') || data.locations[1]
+          setPickupId(mainGate ? mainGate.id : data.locations[0].id)
+          if (defaultDrop) {
+            setDropId(defaultDrop.id)
           }
         }
       } catch (err) {
@@ -100,14 +188,63 @@ export default function StudentDashboardPage() {
     fetchStudentBookings()
     fetchActiveShuttles()
 
-    // 5-second polling interval for live shuttle GPS updates
+    // Relaxed background heartbeat (12s) while real-time SSE delivers instant sub-second events!
     const interval = setInterval(() => {
       fetchActiveShuttles()
       fetchStudentBookings()
-    }, 5000)
+    }, 12000)
 
     return () => clearInterval(interval)
   }, [])
+
+  // Real-Time SSE Listener for Instant Driver Approvals, Rejections, Boarding, and GPS
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const studentId = (session?.user as { id?: string })?.id
+    const studentChannel = studentId ? `student_${studentId}` : '*'
+    const channels = `${studentChannel},shuttles_gps`
+
+    let es: EventSource | null = null
+    try {
+      es = new EventSource(`/api/realtime?channels=${channels}`)
+
+      es.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.event === 'booking_updated' || msg.event === 'booking_created') {
+            if (msg.data) {
+              setActiveBooking(msg.data)
+            }
+            fetchStudentBookings()
+          } else if (msg.event === 'seats_updated') {
+            fetchActiveShuttles()
+          } else if (msg.event === 'shuttle_moved' && msg.data) {
+            const moved = msg.data
+            setActiveShuttles((prev) =>
+              prev.map((s) =>
+                s.id === moved.id
+                  ? {
+                      ...s,
+                      currentLat: moved.currentLat,
+                      currentLng: moved.currentLng,
+                      availableSeats: moved.availableSeats ?? s.availableSeats,
+                    }
+                  : s
+              )
+            )
+          }
+        } catch {
+          // Resilient stream handling
+        }
+      }
+    } catch (err) {
+      console.warn('Student SSE listener notice:', err)
+    }
+
+    return () => {
+      if (es) es.close()
+    }
+  }, [session?.user])
 
   // Fetch active shuttles for map
   async function fetchActiveShuttles() {
@@ -116,11 +253,19 @@ export default function StudentDashboardPage() {
       const data = await res.json()
       if (data.shuttles) {
         setActiveShuttles(data.shuttles)
+        setSelectedDriverVehicleId((prev) => {
+          if (prev && data.shuttles.some((s: ShuttleItem) => s.id === prev)) {
+            return prev
+          }
+          return data.shuttles[0]?.id || null
+        })
       }
     } catch (err) {
       console.error('Failed to fetch active shuttles:', err)
     }
   }
+
+  const [cancelling, setCancelling] = useState(false)
 
   // Fetch student bookings
   async function fetchStudentBookings() {
@@ -129,13 +274,43 @@ export default function StudentDashboardPage() {
       const data = await res.json()
       if (data.bookings && data.bookings.length > 0) {
         const active = data.bookings.find(
-          (b: BookingItem) => b.status === 'RESERVED' || b.status === 'BOARDED'
+          (b: BookingItem) =>
+            b.status === 'REQUESTED' ||
+            b.status === 'ACCEPTED' ||
+            b.status === 'RESERVED' ||
+            b.status === 'BOARDED' ||
+            b.status === 'REJECTED'
         )
         setActiveBooking(active || null)
         setPastBookings(data.bookings.filter((b: BookingItem) => b.id !== active?.id))
+      } else {
+        setActiveBooking(null)
       }
     } catch (err) {
       console.error('Failed to fetch bookings:', err)
+    }
+  }
+
+  const handleCancelBooking = async (bookingId: string) => {
+    setCancelling(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/bookings/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to cancel booking.')
+      }
+      setActiveBooking(null)
+      setSuccessMsg('Booking request cancelled successfully.')
+      fetchStudentBookings()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to cancel booking.')
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -155,10 +330,16 @@ export default function StudentDashboardPage() {
     setSubmitting(true)
 
     try {
+      const targetVehicleId = selectedDriverVehicleId || (activeShuttles.length > 0 ? activeShuttles[0].id : undefined)
       const res = await fetch('/api/bookings/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pickupId, dropId, seatsBooked }),
+        body: JSON.stringify({
+          pickupId,
+          dropId,
+          seatsBooked,
+          vehicleId: targetVehicleId,
+        }),
       })
 
       const data = await res.json()
@@ -167,7 +348,7 @@ export default function StudentDashboardPage() {
         throw new Error(data.error || 'Seat reservation failed.')
       }
 
-      setSuccessMsg('Seat reserved successfully! Show your QR code to the shuttle driver.')
+      setSuccessMsg('Ride requested! Waiting for driver approval...')
       setActiveBooking(data.booking)
       fetchStudentBookings()
     } catch (err: unknown) {
@@ -203,6 +384,41 @@ export default function StudentDashboardPage() {
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Boarding verification failed.')
     }
+  }
+
+  const handleSelectStop = useCallback(
+    (stopName: string) => {
+      const loc = locations.find((l) => l.name.toLowerCase() === stopName.toLowerCase())
+      if (loc) {
+        setPickupId(loc.id)
+      }
+    },
+    [locations]
+  )
+
+  const selectedShuttle =
+    activeShuttles.find(
+      (s) => s.id === (selectedDriverVehicleId || activeBooking?.vehicleId)
+    ) || activeShuttles[0]
+
+  const currentPickup = locations.find((l) => l.id === pickupId)
+
+  let selectedShuttleDistance: number | null = null
+  let selectedShuttleEta: number | null = null
+
+  if (
+    selectedShuttle &&
+    selectedShuttle.currentLat &&
+    selectedShuttle.currentLng &&
+    currentPickup
+  ) {
+    selectedShuttleDistance = calculateDistanceMeters(
+      selectedShuttle.currentLat,
+      selectedShuttle.currentLng,
+      currentPickup.latitude,
+      currentPickup.longitude
+    )
+    selectedShuttleEta = Math.max(1, Math.round(selectedShuttleDistance / 250))
   }
 
   const studentName = session?.user?.name || 'KLU Student'
@@ -293,25 +509,164 @@ export default function StudentDashboardPage() {
           </div>
         )}
 
+        {/* Turn on Location Access Banner */}
+        {locationPermissionPrompt && !studentLocation && (
+          <div className="p-4 rounded-3xl bg-blue-950/80 border border-blue-500/40 text-xs shadow-2xl backdrop-blur-md flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 animate-fadeIn">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 rounded-2xl bg-blue-500/20 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
+                <MapPin className="w-5 h-5 animate-bounce" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="font-bold text-sm text-white">Turn On Device Location</h4>
+                <p className="text-[11px] text-blue-200/80 leading-relaxed">
+                  Enable GPS to view your live position on the campus satellite map and automatically highlight your nearest shuttle stop.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={requestStudentLocation}
+              disabled={locatingStudent}
+              className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs shrink-0 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-950/50 disabled:opacity-50"
+            >
+              {locatingStudent ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Detecting GPS...</span>
+                </>
+              ) : (
+                <>
+                  <Crosshair className="w-3.5 h-3.5" />
+                  <span>Turn On GPS</span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
         {/* 2-Column Responsive Desktop Grid */}
         <div className="lg:grid lg:grid-cols-12 lg:gap-6 lg:items-start space-y-6 lg:space-y-0">
           
           {/* Left Column: Map & Active Ticket */}
-          <div className="lg:col-span-7 space-y-6">
+          <div className="lg:col-span-7 space-y-5">
+
+            {/* Live Driver Telemetry & Contact Card for Students */}
+            {selectedShuttle && (
+              <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-amber-500/40 shadow-2xl space-y-3.5 animate-fadeIn">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 font-bold shrink-0">
+                      <Bus className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-extrabold text-sm sm:text-base text-white truncate">
+                          {selectedShuttle.vehicleNumber}
+                        </h3>
+                        <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold flex items-center gap-1 shrink-0">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                          LIVE GPS
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-300 truncate">
+                        Driver: <strong className="text-white">{selectedShuttle.driver.name}</strong>
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="px-2.5 py-1 rounded-xl bg-slate-950 border border-slate-800 text-[11px] font-mono font-bold text-amber-400">
+                      {selectedShuttle.availableSeats}/{selectedShuttle.capacity} Seats Free
+                    </span>
+
+                    {selectedShuttle.driver.phone && (
+                      <a
+                        href={`tel:${selectedShuttle.driver.phone}`}
+                        className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-emerald-950/40"
+                        title="Call Shuttle Driver"
+                      >
+                        <PhoneCall className="w-3.5 h-3.5" />
+                        <span>Call Driver</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                {/* Real-time Distance & ETA to Selected Pickup Stop */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800/80 flex items-center justify-between">
+                    <span className="text-slate-400 flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      Distance to Pickup:
+                    </span>
+                    <span className="font-bold text-blue-300 font-mono">
+                      {selectedShuttleDistance !== null
+                        ? `${selectedShuttleDistance}m (~${selectedShuttleEta} min ETA)`
+                        : 'Tracking active'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800/80 flex items-center justify-between">
+                    <span className="text-slate-400 flex items-center gap-1.5">
+                      <Navigation className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      Live Status:
+                    </span>
+                    <span className="font-bold text-emerald-400 flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                      Broadcasting on Campus
+                    </span>
+                  </div>
+                </div>
+
+                {/* Multiple Active Shuttles Selector Pills */}
+                {activeShuttles.length > 1 && (
+                  <div className="pt-1 flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider mr-1">
+                      Online Shuttles:
+                    </span>
+                    {activeShuttles.map((shuttle) => (
+                      <button
+                        key={shuttle.id}
+                        type="button"
+                        onClick={() => setSelectedDriverVehicleId(shuttle.id)}
+                        className={`px-2.5 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                          selectedShuttle?.id === shuttle.id
+                            ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-950/40'
+                            : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                        }`}
+                      >
+                        <Bus className="w-3 h-3" />
+                        <span>{shuttle.vehicleNumber}</span>
+                        <span className="text-[10px] opacity-80 font-mono">
+                          ({shuttle.availableSeats} seats)
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Live GPS Shuttle Campus Map */}
             <div className="space-y-2">
               <div className="flex items-center justify-between px-1">
                 <h2 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                   <MapPin className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                  Live Campus Shuttle Tracking
+                  Live Satellite GPS Shuttle Tracking
                 </h2>
-                <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1">
+                <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-                  Updated every 5s
+                  Telemetry active (5s)
                 </span>
               </div>
 
-              <DriverMap shuttles={activeShuttles} />
+              <DriverMap
+                shuttles={activeShuttles}
+                activeVehicleId={selectedShuttle?.id || activeBooking?.vehicleId}
+                userLocation={studentLocation}
+                onRequestLocation={requestStudentLocation}
+                onSelectShuttle={(shuttle) => setSelectedDriverVehicleId(shuttle.id)}
+                onSelectStop={handleSelectStop}
+              />
             </div>
 
             {/* Active Ticket Banner */}
@@ -320,19 +675,75 @@ export default function StudentDashboardPage() {
                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                   <div className="flex items-center gap-2">
                     <Ticket className="w-5 h-5 text-emerald-400 shrink-0" />
-                    <span className="font-bold text-sm text-white">Active Shuttle Ticket</span>
+                    <span className="font-bold text-sm text-white">Shuttle Ride Status</span>
                   </div>
-                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-xs font-bold text-emerald-400 uppercase tracking-wider shrink-0">
-                    {activeBooking.status}
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider shrink-0 border ${
+                      activeBooking.status === 'REQUESTED'
+                        ? 'bg-amber-500/10 border-amber-500/40 text-amber-400 animate-pulse'
+                        : activeBooking.status === 'REJECTED'
+                        ? 'bg-red-500/10 border-red-500/40 text-red-400'
+                        : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                    }`}
+                  >
+                    {activeBooking.status === 'REQUESTED'
+                      ? 'Waiting Approval'
+                      : activeBooking.status === 'ACCEPTED'
+                      ? 'Driver Approved'
+                      : activeBooking.status}
                   </span>
                 </div>
+
+                {/* Status Notice Message */}
+                {activeBooking.status === 'REQUESTED' && (
+                  <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-1 text-xs text-amber-300">
+                    <p className="font-bold flex items-center gap-1.5 text-amber-400">
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+                      </span>
+                      Notification Sent to Driver
+                    </p>
+                    <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                      Your booking request has been sent to the shuttle driver for approval. Please wait a moment while the driver confirms.
+                    </p>
+                  </div>
+                )}
+
+                {activeBooking.status === 'REJECTED' && (
+                  <div className="p-3.5 rounded-2xl bg-red-500/10 border border-red-500/30 space-y-2 text-xs text-red-300">
+                    <p className="font-bold text-red-400">
+                      Booking Request Declined by Driver
+                    </p>
+                    <p className="text-[11px] text-red-200/90 leading-relaxed">
+                      The shuttle driver was unable to accept your request at this time. Any held seats have been released.
+                    </p>
+                    <button
+                      onClick={() => setActiveBooking(null)}
+                      className="py-1.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-red-500/40 text-white font-semibold text-xs transition-colors"
+                    >
+                      Book Another Ride
+                    </button>
+                  </div>
+                )}
+
+                {(activeBooking.status === 'ACCEPTED' || activeBooking.status === 'RESERVED') && (
+                  <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+                    <p className="font-bold text-emerald-400">
+                      Ride Approved by Driver!
+                    </p>
+                    <p className="text-[11px] text-emerald-200/90 leading-relaxed">
+                      Your seat is confirmed. Show your boarding QR code or scan the vehicle QR code when the shuttle arrives.
+                    </p>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 xs:grid-cols-2 gap-3 text-xs">
                   <div className="space-y-0.5 min-w-0">
                     <span className="text-slate-400">Pickup Stop</span>
                     <p className="font-semibold text-slate-200 flex items-center gap-1 truncate">
                       <MapPin className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                      <span className="truncate">{activeBooking.pickup.name}</span>
+                      <span className="truncate">{activeBooking.pickup?.name || 'Pickup Stop'}</span>
                     </p>
                   </div>
 
@@ -340,14 +751,29 @@ export default function StudentDashboardPage() {
                     <span className="text-slate-400">Drop Stop</span>
                     <p className="font-semibold text-slate-200 flex items-center gap-1 truncate">
                       <MapPin className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                      <span className="truncate">{activeBooking.drop.name}</span>
+                      <span className="truncate">{activeBooking.drop?.name || 'Drop Stop'}</span>
                     </p>
                   </div>
 
                   <div className="space-y-0.5 min-w-0">
                     <span className="text-slate-400">Shuttle & Driver</span>
-                    <p className="font-semibold text-slate-200 truncate">
-                      {activeBooking.vehicle.vehicleNumber} ({activeBooking.vehicle.driver.name.split(' ')[0]})
+                    <p className="font-semibold text-slate-200 truncate flex items-center gap-2">
+                      <span>
+                        {activeBooking.vehicle?.vehicleNumber || 'Shuttle'}
+                        {activeBooking.vehicle?.driver?.name
+                          ? ` (${activeBooking.vehicle.driver.name.split(' ')[0]})`
+                          : ''}
+                      </span>
+                      {activeBooking.vehicle?.driver?.phone && (
+                        <a
+                          href={`tel:${activeBooking.vehicle.driver.phone}`}
+                          className="px-2 py-0.5 rounded-lg bg-emerald-500/20 text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-1 text-[10px] shrink-0 transition-colors"
+                          title="Call Driver"
+                        >
+                          <Phone className="w-2.5 h-2.5" />
+                          <span>Call</span>
+                        </a>
+                      )}
                     </p>
                   </div>
 
@@ -359,28 +785,43 @@ export default function StudentDashboardPage() {
                   </div>
                 </div>
 
-                {/* Scan Vehicle QR to Board Button (For RESERVED Tickets) */}
-                {activeBooking.status === 'RESERVED' && (
+                {/* Scan Vehicle QR to Board Button (For ACCEPTED or RESERVED Tickets) */}
+                {(activeBooking.status === 'ACCEPTED' || activeBooking.status === 'RESERVED') && (
                   <button
                     id="scan-vehicle-qr-btn"
                     onClick={() => setShowScannerModal(true)}
                     className="w-full py-3 px-4 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-bold text-xs shadow-lg transition-all flex items-center justify-center gap-2"
                   >
                     <Camera className="w-4 h-4" />
-                    Scan Vehicle QR to Board
+                    <span>Scan Vehicle QR to Board</span>
                   </button>
                 )}
 
-                <button
-                  onClick={() => setShowQRModal(!showQRModal)}
-                  className="w-full py-2.5 px-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 text-emerald-300 font-semibold text-xs transition-all flex items-center justify-center gap-2"
-                >
-                  <QrCode className="w-4 h-4" />
-                  {showQRModal ? 'Hide Digital Ticket QR' : 'Show Boarding Pass QR Code'}
-                </button>
+                {/* Digital Ticket QR Button (For ACCEPTED, RESERVED, or BOARDED Tickets) */}
+                {activeBooking.status !== 'REQUESTED' && activeBooking.status !== 'REJECTED' && (
+                  <button
+                    onClick={() => setShowQRModal(!showQRModal)}
+                    className="w-full py-2.5 px-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 hover:bg-emerald-500/20 text-emerald-300 font-semibold text-xs transition-all flex items-center justify-center gap-2"
+                  >
+                    <QrCode className="w-4 h-4" />
+                    <span>{showQRModal ? 'Hide Digital Ticket QR' : 'Show Boarding Pass QR Code'}</span>
+                  </button>
+                )}
+
+                {/* Cancel Booking / Request Button */}
+                {activeBooking.status !== 'BOARDED' && activeBooking.status !== 'REJECTED' && (
+                  <button
+                    onClick={() => handleCancelBooking(activeBooking.id)}
+                    disabled={cancelling}
+                    className="w-full py-2 px-3 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-red-400 font-medium text-xs transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>{cancelling ? 'Cancelling...' : activeBooking.status === 'REQUESTED' ? 'Cancel Ride Request' : 'Cancel Booking'}</span>
+                  </button>
+                )}
 
                 {/* QR Code Digital Pass */}
-                {showQRModal && (
+                {showQRModal && (activeBooking.status === 'ACCEPTED' || activeBooking.status === 'RESERVED' || activeBooking.status === 'BOARDED') && (
                   <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-center space-y-2 animate-fadeIn">
                     <div className="mx-auto w-36 h-36 sm:w-40 sm:h-40 bg-white p-3 rounded-xl flex items-center justify-center shadow-inner">
                       <div className="w-full h-full border-4 border-slate-950 rounded bg-slate-950 p-2 text-white font-mono text-[9px] flex flex-col justify-between items-center text-center overflow-hidden">
@@ -391,7 +832,7 @@ export default function StudentDashboardPage() {
                       </div>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      Present this QR code to Driver upon entering shuttle <strong className="text-white">{activeBooking.vehicle.vehicleNumber}</strong>
+                      Present this QR code to Driver upon entering shuttle <strong className="text-white">{activeBooking.vehicle?.vehicleNumber || 'Shuttle'}</strong>
                     </p>
                   </div>
                 )}
@@ -429,6 +870,35 @@ export default function StudentDashboardPage() {
 
               <form onSubmit={handleBookingSubmit} className="space-y-4">
                 
+                {/* Shuttle & Driver Selector */}
+                {activeShuttles.length > 0 && (
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-semibold text-slate-300">
+                      Select Shuttle / Driver
+                    </label>
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-amber-400">
+                        <Bus className="w-4 h-4" />
+                      </div>
+                      <select
+                        id="shuttle-select"
+                        value={selectedDriverVehicleId || activeShuttles[0]?.id}
+                        onChange={(e) => setSelectedDriverVehicleId(e.target.value)}
+                        className="w-full pl-10 pr-8 py-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 text-xs sm:text-sm text-slate-100 outline-none appearance-none transition-all cursor-pointer font-medium"
+                      >
+                        {activeShuttles.map((shuttle) => (
+                          <option key={shuttle.id} value={shuttle.id}>
+                            {shuttle.vehicleNumber} ({shuttle.driver?.name || 'Driver'}) • {shuttle.availableSeats} seat(s) open
+                          </option>
+                        ))}
+                      </select>
+                      <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-slate-500">
+                        <ChevronDown className="w-4 h-4" />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Pickup Location Selector */}
                 <div className="space-y-1.5">
                   <label className="block text-xs font-semibold text-slate-300">
@@ -609,7 +1079,8 @@ export default function StudentDashboardPage() {
         {/* Camera QR Scanner Modal */}
         {showScannerModal && (
           <QrScanner
-            expectedVehicleId={activeBooking?.vehicleId || 'demo-vehicle-id'}
+            expectedVehicleId={activeBooking?.vehicleId || ''}
+            expectedVehicleNumber={activeBooking?.vehicle?.vehicleNumber}
             onScanSuccess={handleQrScanSuccess}
             onClose={() => setShowScannerModal(false)}
           />

@@ -19,9 +19,15 @@ import {
   RefreshCw,
   AlertCircle,
   Building2,
+  Bell,
+  Sparkles,
+  Check,
+  X,
+  Phone,
 } from 'lucide-react'
 
 const PaymentModal = dynamic(() => import('@/components/PaymentModal'), { ssr: false })
+const RefillSeatsModal = dynamic(() => import('@/components/RefillSeatsModal'), { ssr: false })
 
 interface VehicleData {
   id: string
@@ -55,23 +61,26 @@ interface BookingData {
 }
 
 const KARE_SIMULATED_WAYPOINTS = [
-  { lat: 9.5701, lng: 77.6745, stop: 'Main Gate' },
-  { lat: 9.5715, lng: 77.6738, stop: 'Admin Block' },
-  { lat: 9.5722, lng: 77.6742, stop: 'Library' },
-  { lat: 9.5692, lng: 77.6765, stop: '9th Block' },
-  { lat: 9.5688, lng: 77.677, stop: '11th Block' },
-  { lat: 9.5685, lng: 77.6758, stop: 'Girls Hostel' },
+  { lat: 9.5761, lng: 77.6833, stop: 'Main Gate' },
+  { lat: 9.5762, lng: 77.6814, stop: 'Girls Hostel' },
+  { lat: 9.5747, lng: 77.6787, stop: 'Library' },
+  { lat: 9.5741, lng: 77.6760, stop: 'Admin Block' },
+  { lat: 9.5750, lng: 77.6761, stop: '8th Block' },
+  { lat: 9.5743, lng: 77.6748, stop: '9th Block' },
+  { lat: 9.5738, lng: 77.6739, stop: '7th Block' },
+  { lat: 9.5732, lng: 77.6751, stop: '11th Block' },
 ]
 
 export default function DriverDashboardPage() {
   const router = useRouter()
   const [isOnDuty, setIsOnDuty] = useState(false)
-  const [isSimulatingGps, setIsSimulatingGps] = useState(true)
+  const [isSimulatingGps, setIsSimulatingGps] = useState(false)
   const [waypointIndex, setWaypointIndex] = useState(0)
+  const [locationPromptNeeded, setLocationPromptNeeded] = useState(false)
 
   const [currentCoords, setCurrentCoords] = useState<{ lat: number; lng: number }>({
-    lat: 9.5701,
-    lng: 77.6745,
+    lat: 9.5761,
+    lng: 77.6833,
   })
 
   const [vehicle, setVehicle] = useState<VehicleData | null>(null)
@@ -81,8 +90,34 @@ export default function DriverDashboardPage() {
 
   const [selectedBookingForPayment, setSelectedBookingForPayment] = useState<BookingData | null>(null)
   const [completingTrip, setCompletingTrip] = useState(false)
+  const [showRefillModal, setShowRefillModal] = useState(false)
+  const [finishedRideStudentName, setFinishedRideStudentName] = useState<string | undefined>(undefined)
+  const [respondingBookingId, setRespondingBookingId] = useState<string | null>(null)
 
   const watchIdRef = useRef<number | null>(null)
+  const prevRequestedCountRef = useRef(0)
+
+  // Web Audio chime for incoming student booking requests
+  const playNotificationAlert = useCallback(() => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+      if (!AudioContextClass) return
+      const ctx = new AudioContextClass()
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(659.25, ctx.currentTime) // E5
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.12) // A5
+      gain.gain.setValueAtTime(0.25, ctx.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35)
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start()
+      osc.stop(ctx.currentTime + 0.35)
+    } catch {
+      // Audio autoplay restrictions handled gracefully
+    }
+  }, [])
 
   // Send GPS location to server
   const broadcastLocation = useCallback(async (lat: number, lng: number, onlineStatus: boolean) => {
@@ -146,19 +181,89 @@ export default function DriverDashboardPage() {
 
   useEffect(() => {
     fetchDriverData()
-    const interval = setInterval(fetchDriverData, 5000)
+    // Relaxed fallback sync (12s) while real-time SSE pushes instant updates (< 20ms)
+    const interval = setInterval(fetchDriverData, 12000)
     return () => clearInterval(interval)
   }, [fetchDriverData])
+
+  // Real-Time SSE Listener for Instant Student Requests & Updates
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const vehicleChannel = vehicle?.id ? `vehicle_${vehicle.id}` : null
+    const channels = vehicleChannel ? `${vehicleChannel},shuttles_gps` : 'shuttles_gps'
+
+    let es: EventSource | null = null
+    try {
+      es = new EventSource(`/api/realtime?channels=${channels}`)
+
+      es.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data)
+          if (msg.event === 'booking_created' && msg.data) {
+            const newBooking: BookingData = msg.data
+            setBookings((prev) => {
+              if (prev.some((b) => b.id === newBooking.id)) return prev
+              return [newBooking, ...prev]
+            })
+            playNotificationAlert()
+            setStatusMsg(`New booking request from ${newBooking.student?.name || 'Student'}!`)
+          } else if (msg.event === 'booking_updated' && msg.data) {
+            const updated: BookingData = msg.data
+            setBookings((prev) =>
+              prev.map((b) => (b.id === updated.id ? { ...b, ...updated } : b))
+            )
+          } else if (msg.event === 'seats_updated' && msg.data) {
+            if (msg.data.vehicleId === vehicle?.id && typeof msg.data.availableSeats === 'number') {
+              setVehicle((prev) =>
+                prev ? { ...prev, availableSeats: msg.data.availableSeats } : prev
+              )
+            }
+          }
+        } catch {
+          // Resilient stream handling
+        }
+      }
+    } catch (err) {
+      console.warn('Driver SSE listener notice:', err)
+    }
+
+    return () => {
+      if (es) es.close()
+    }
+  }, [vehicle?.id, playNotificationAlert])
 
   // Handle On Duty Toggle
   const toggleDuty = async () => {
     const nextState = !isOnDuty
-    setIsOnDuty(nextState)
 
     if (nextState) {
+      if (!isSimulatingGps && 'geolocation' in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            const lat = pos.coords.latitude
+            const lng = pos.coords.longitude
+            setCurrentCoords({ lat, lng })
+            setIsOnDuty(true)
+            setLocationPromptNeeded(false)
+            setStatusMsg('On Duty active! Broadcasting real-time device GPS.')
+            broadcastLocation(lat, lng, true)
+          },
+          (err) => {
+            console.warn('Location permission needed:', err)
+            setLocationPromptNeeded(true)
+            setStatusMsg('Location is required. Please turn on device GPS.')
+          },
+          { enableHighAccuracy: true, timeout: 8000 }
+        )
+        return
+      }
+
+      setIsOnDuty(true)
       setStatusMsg('On Duty active! Broadcasting real-time GPS coordinates.')
       broadcastLocation(currentCoords.lat, currentCoords.lng, true)
     } else {
+      setIsOnDuty(false)
+      setLocationPromptNeeded(false)
       setStatusMsg('Off Duty. Location broadcasting stopped.')
       broadcastLocation(currentCoords.lat, currentCoords.lng, false)
       if (watchIdRef.current !== null) {
@@ -213,16 +318,71 @@ export default function DriverDashboardPage() {
     }
   }, [isOnDuty, isSimulatingGps, broadcastLocation])
 
+  // Play audio chime and trigger alert when new booking requests arrive
+  useEffect(() => {
+    const currentRequested = bookings.filter((b) => b.status === 'REQUESTED').length
+    if (currentRequested > prevRequestedCountRef.current) {
+      playNotificationAlert()
+    }
+    prevRequestedCountRef.current = currentRequested
+  }, [bookings, playNotificationAlert])
+
   const handleLogout = async () => {
     await fetch('/api/driver/logout', { method: 'POST' })
     router.push('/driver/login')
   }
 
-  // Complete Trip & Restore Seats
+  // Handle Driver Approve / Reject of incoming student booking request (Instant Optimistic Update)
+  const handleRespondBooking = async (bookingId: string, action: 'APPROVE' | 'REJECT') => {
+    setRespondingBookingId(bookingId)
+
+    // OPTIMISTIC UPDATE: update local state in 0ms!
+    const targetBooking = bookings.find((b) => b.id === bookingId)
+    const newStatus = action === 'APPROVE' ? 'ACCEPTED' : 'REJECTED'
+    setBookings((prev) =>
+      prev.map((b) => (b.id === bookingId ? { ...b, status: newStatus } : b))
+    )
+    if (action === 'REJECT' && targetBooking) {
+      setVehicle((prev) =>
+        prev
+          ? {
+              ...prev,
+              availableSeats: Math.min(prev.capacity, prev.availableSeats + targetBooking.seatsBooked),
+            }
+          : prev
+      )
+    }
+
+    try {
+      const res = await fetch('/api/bookings/respond', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId, action }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.error || `Failed to ${action.toLowerCase()} request.`)
+      }
+      setStatusMsg(data.message)
+    } catch (err: unknown) {
+      // Revert optimistic update on failure
+      if (targetBooking) {
+        setBookings((prev) =>
+          prev.map((b) => (b.id === bookingId ? targetBooking : b))
+        )
+      }
+      setStatusMsg(err instanceof Error ? err.message : 'Error updating request.')
+    } finally {
+      setRespondingBookingId(null)
+    }
+  }
+
+  // Complete Trip & Prompt Driver to Refill Seats
   const handleConfirmPaymentAndComplete = async () => {
     if (!selectedBookingForPayment) return
 
     setCompletingTrip(true)
+    const passengerName = selectedBookingForPayment.student.name
 
     try {
       const res = await fetch('/api/bookings/complete', {
@@ -237,9 +397,13 @@ export default function DriverDashboardPage() {
         throw new Error(data.error || 'Failed to complete trip.')
       }
 
-      setStatusMsg(data.message || 'Trip completed and seats restored!')
+      setStatusMsg(data.message || 'Trip completed!')
       setSelectedBookingForPayment(null)
-      fetchDriverData()
+      await fetchDriverData()
+
+      // Ask driver after finishing ride to refill or adjust seats
+      setFinishedRideStudentName(passengerName)
+      setShowRefillModal(true)
     } catch (err: unknown) {
       setStatusMsg(err instanceof Error ? err.message : 'Trip completion failed.')
     } finally {
@@ -247,9 +411,10 @@ export default function DriverDashboardPage() {
     }
   }
 
-  // Group BOARDED passengers by Drop-off stop location
+  // Partition bookings into REQUESTED (needs driver action), ACCEPTED/RESERVED (pending boarding), and BOARDED
+  const requestedBookings = bookings.filter((b) => b.status === 'REQUESTED')
+  const reservedBookings = bookings.filter((b) => b.status === 'ACCEPTED' || b.status === 'RESERVED')
   const boardedBookings = bookings.filter((b) => b.status === 'BOARDED')
-  const reservedBookings = bookings.filter((b) => b.status === 'RESERVED')
 
   const groupedBoardedByDrop = boardedBookings.reduce((acc, booking) => {
     const dropName = booking.drop.name
@@ -450,7 +615,27 @@ export default function DriverDashboardPage() {
                   </button>
                 </div>
 
-                {statusMsg && (
+                {locationPromptNeeded && (
+                  <div className="p-3.5 rounded-2xl bg-amber-950/80 border border-amber-500/50 text-xs text-amber-200 flex flex-col gap-2 animate-fadeIn">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span className="font-semibold text-white">Device Location is Turned Off</span>
+                    </div>
+                    <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                      Please allow browser location permissions to broadcast your live GPS shuttle position to students.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={toggleDuty}
+                      className="w-full py-2 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      Allow & Turn On GPS
+                    </button>
+                  </div>
+                )}
+
+                {statusMsg && !locationPromptNeeded && (
                   <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                     <span>{statusMsg}</span>
@@ -505,11 +690,101 @@ export default function DriverDashboardPage() {
                     {availableSeats} <span className="text-xs text-slate-500 font-normal">/ {capacity}</span>
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFinishedRideStudentName(undefined)
+                    setShowRefillModal(true)
+                  }}
+                  className="w-full py-2.5 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 font-bold text-xs transition-colors flex items-center justify-center gap-2"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Refill / Adjust Open Seats</span>
+                </button>
               </div>
             </div>
 
             {/* Right Column: Passengers & Reservations */}
             <div className="lg:col-span-7 space-y-6">
+
+              {/* INCOMING BOOKING REQUESTS (Approve / Reject) */}
+              {requestedBookings.length > 0 && (
+                <div className="p-4 sm:p-5 rounded-3xl bg-amber-500/10 border-2 border-amber-500 shadow-2xl shadow-amber-500/20 space-y-3">
+                  <div className="flex items-center justify-between border-b border-amber-500/30 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="relative flex h-3 w-3">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                      </span>
+                      <h2 className="text-sm font-extrabold text-white flex items-center gap-2">
+                        <Bell className="w-4 h-4 text-amber-400 animate-bounce" />
+                        <span>Incoming Ride Requests ({requestedBookings.length})</span>
+                      </h2>
+                    </div>
+                    <span className="px-2.5 py-0.5 rounded-full bg-amber-500 text-slate-950 font-black text-[10px] uppercase tracking-wide">
+                      Approval Required
+                    </span>
+                  </div>
+
+                  <div className="space-y-3">
+                    {requestedBookings.map((req) => (
+                      <div
+                        key={req.id}
+                        className="p-3.5 sm:p-4 rounded-2xl bg-slate-900 border border-amber-500/40 space-y-3"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <p className="font-bold text-sm text-white">{req.student?.name || 'Student'}</p>
+                            {req.student?.phone && (
+                              <p className="text-[11px] text-slate-400 flex items-center gap-1">
+                                <Phone className="w-3 h-3 text-slate-500" />
+                                {req.student.phone}
+                              </p>
+                            )}
+                          </div>
+                          <span className="text-xs font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
+                            {req.seatsBooked} Seat(s) • ₹{req.fareAmount}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs text-slate-300 p-2.5 rounded-xl bg-slate-950 border border-slate-800">
+                          <div>
+                            <span className="text-[10px] text-slate-500 block">Pickup Location</span>
+                            <span className="font-semibold text-blue-400 block truncate">{req.pickup.name}</span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-slate-500 block">Drop Location</span>
+                            <span className="font-semibold text-emerald-400 block truncate">{req.drop.name}</span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 pt-1">
+                          <button
+                            id={`approve-btn-${req.id}`}
+                            onClick={() => handleRespondBooking(req.id, 'APPROVE')}
+                            disabled={respondingBookingId === req.id}
+                            className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 font-black text-xs shadow-md transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                          >
+                            <Check className="w-4 h-4" />
+                            <span>{respondingBookingId === req.id ? 'Approving...' : 'Approve'}</span>
+                          </button>
+                          <button
+                            id={`reject-btn-${req.id}`}
+                            onClick={() => handleRespondBooking(req.id, 'REJECT')}
+                            disabled={respondingBookingId === req.id}
+                            className="py-2.5 px-3 rounded-xl bg-red-950/80 hover:bg-red-900 border border-red-500/40 text-red-200 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                          >
+                            <X className="w-4 h-4" />
+                            <span>{respondingBookingId === req.id ? 'Rejecting...' : 'Reject'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* BOARDED Passengers Grouped by Drop Location */}
               <div className="p-4 sm:p-6 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-2xl space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -554,7 +829,7 @@ export default function DriverDashboardPage() {
                             >
                               <div className="space-y-0.5 min-w-0">
                                 <p className="font-semibold text-slate-100 truncate">
-                                  {passenger.student.name}
+                                  {passenger.student?.name || 'Student'}
                                 </p>
                                 <p className="text-[10px] text-slate-400 truncate">
                                   Pickup: {passenger.pickup.name} • {passenger.seatsBooked} Seat(s)
@@ -607,7 +882,7 @@ export default function DriverDashboardPage() {
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span className="font-bold text-xs text-white truncate">
-                            {booking.student.name}
+                            {booking.student?.name || 'Student'}
                           </span>
                           <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/30 text-[10px] font-bold text-blue-400 uppercase shrink-0">
                             {booking.status}
@@ -650,6 +925,27 @@ export default function DriverDashboardPage() {
             onConfirm={handleConfirmPaymentAndComplete}
             onCancel={() => setSelectedBookingForPayment(null)}
             submitting={completingTrip}
+          />
+        )}
+
+        {/* Refill Seats Prompt Modal (After Ride Finished or Manual) */}
+        {showRefillModal && (
+          <RefillSeatsModal
+            vehicleId={vehicle?.id}
+            currentSeats={availableSeats}
+            capacity={capacity}
+            passengerName={finishedRideStudentName}
+            onClose={() => {
+              setShowRefillModal(false)
+              setFinishedRideStudentName(undefined)
+            }}
+            onSeatsUpdated={(newCount) => {
+              if (vehicle) {
+                setVehicle({ ...vehicle, availableSeats: newCount })
+              }
+              setStatusMsg(`Seats successfully updated to ${newCount}!`)
+              fetchDriverData()
+            }}
           />
         )}
 
