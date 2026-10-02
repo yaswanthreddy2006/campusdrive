@@ -9,7 +9,6 @@ import {
   ClipboardPaste,
   CheckCircle2,
   AlertCircle,
-  RefreshCw,
   Bus,
 } from 'lucide-react'
 
@@ -29,7 +28,6 @@ export default function QrScanner({
   const [manualInput, setManualInput] = useState('')
   const [scannerError, setScannerError] = useState<string | null>(null)
   const [pasteNotice, setPasteNotice] = useState<string | null>(null)
-  const [cameraActive, setCameraActive] = useState<boolean>(false)
   const scannerRef = useRef<Html5QrcodeScanner | null>(null)
 
   const handleScanSubmit = useCallback(
@@ -60,7 +58,6 @@ export default function QrScanner({
 
   useEffect(() => {
     const scannerId = 'reader-container'
-    setCameraActive(true)
 
     try {
       const scanner = new Html5QrcodeScanner(
@@ -88,7 +85,6 @@ export default function QrScanner({
       scannerRef.current = scanner
     } catch (err) {
       console.warn('Unable to start HTML5 camera scanner:', err)
-      setCameraActive(false)
       setScannerError('Camera access unavailable or blocked on this device. You can paste the link/code below.')
     }
 
