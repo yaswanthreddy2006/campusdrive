@@ -149,6 +149,7 @@ export default function DriverQRPage() {
 
                   {/* Scannable Real QR Image */}
                   <div className="w-52 h-52 sm:w-60 sm:h-60 rounded-xl overflow-hidden flex items-center justify-center bg-white p-1">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={qrImageUrl}
                       alt={`QR Code for ${vehicleNo}`}

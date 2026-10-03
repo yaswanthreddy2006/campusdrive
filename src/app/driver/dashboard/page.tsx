@@ -169,7 +169,7 @@ export default function DriverDashboardPage() {
   }, [])
 
   // Send GPS location to server (Only when ON DUTY)
-  const broadcastLocation = useCallback(async (lat: number, lng: number, onlineStatus: boolean) => {
+  const broadcastLocation = useCallback(async (lat: number, lng: number) => {
     // HARD GUARD: If the driver is off duty, completely discard any background GPS broadcast!
     if (!isOnDutyRef.current) {
       return
@@ -356,7 +356,7 @@ export default function DriverDashboardPage() {
               setCurrentCoords({ lat, lng })
               setLocationPromptNeeded(false)
               setStatusMsg('On Duty active! Broadcasting real-time device GPS.')
-              broadcastLocation(lat, lng, true)
+              broadcastLocation(lat, lng)
             },
             (err) => {
               console.warn('Location permission info:', err.message)
@@ -407,7 +407,7 @@ export default function DriverDashboardPage() {
           const newLat = pos.coords.latitude
           const newLng = pos.coords.longitude
           setCurrentCoords({ lat: newLat, lng: newLng })
-          broadcastLocation(newLat, newLng, true)
+          broadcastLocation(newLat, newLng)
         },
         (err) => {
           console.warn('Geolocation access error, falling back to simulated GPS:', err)
@@ -445,7 +445,7 @@ export default function DriverDashboardPage() {
           const nextIdx = (prevIdx + 1) % KARE_SIMULATED_WAYPOINTS.length
           const wp = KARE_SIMULATED_WAYPOINTS[nextIdx]
           setCurrentCoords({ lat: wp.lat, lng: wp.lng })
-          broadcastLocation(wp.lat, wp.lng, true)
+          broadcastLocation(wp.lat, wp.lng)
           return nextIdx
         })
       }, 5000)
@@ -485,7 +485,7 @@ export default function DriverDashboardPage() {
         }
         return
       }
-      broadcastLocation(currentCoords.lat, currentCoords.lng, true)
+      broadcastLocation(currentCoords.lat, currentCoords.lng)
     }, 10000)
 
     return () => {

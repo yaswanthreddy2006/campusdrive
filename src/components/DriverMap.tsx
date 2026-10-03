@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import {
@@ -119,14 +119,17 @@ export default function DriverMap({
   const [locationToast, setLocationToast] = useState<string | null>(null)
   const [showLocationBanner, setShowLocationBanner] = useState<boolean>(false)
 
-  const activeUserLocation =
-    propUserLocation ||
-    internalUserLocation || {
-      lat: 9.5748,
-      lng: 77.6785,
-      accuracy: 20,
-      isDefault: true,
-    }
+  const activeUserLocation = useMemo(
+    () =>
+      propUserLocation ||
+      internalUserLocation || {
+        lat: 9.5748,
+        lng: 77.6785,
+        accuracy: 20,
+        isDefault: true,
+      },
+    [propUserLocation, internalUserLocation]
+  )
 
   // Synchronize selectedShuttleId
   useEffect(() => {
