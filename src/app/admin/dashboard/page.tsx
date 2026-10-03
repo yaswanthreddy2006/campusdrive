@@ -548,8 +548,8 @@ export default function AdminDashboardPage() {
                             ONLINE
                           </span>
                         ) : (
-                          <span className="px-2.5 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-[10px] font-semibold text-slate-400">
-                            OFFLINE
+                          <span className="px-2.5 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/30 text-[10px] font-semibold text-rose-400">
+                            OFF DUTY
                           </span>
                         )}
                       </td>

@@ -1,5 +1,6 @@
 'use client'
 
+import { useState, useEffect } from 'react'
 import { signIn, useSession, signOut } from 'next-auth/react'
 import Link from 'next/link'
 import {
@@ -17,6 +18,18 @@ import {
 
 export default function LandingPage() {
   const { data: session, status } = useSession()
+  const [activeCount, setActiveCount] = useState<number | null>(null)
+
+  useEffect(() => {
+    fetch('/api/shuttles/active')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && typeof data.count === 'number') {
+          setActiveCount(data.count)
+        }
+      })
+      .catch(() => setActiveCount(0))
+  }, [])
 
   const handleStudentSignIn = () => {
     signIn('google', { callbackUrl: '/student/dashboard', prompt: 'select_account' })
@@ -69,11 +82,17 @@ export default function LandingPage() {
                   <LogOut className="w-4 h-4" />
                 </button>
               </div>
-            ) : (
+            ) : activeCount !== null && activeCount > 0 ? (
               <div className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[11px] sm:text-xs font-medium text-emerald-400">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-                <span className="hidden xs:inline">Campus Shuttles Active</span>
-                <span className="xs:hidden">Active</span>
+                <span className="hidden xs:inline">{activeCount} Shuttle{activeCount > 1 ? 's' : ''} Active</span>
+                <span className="xs:hidden">{activeCount} Active</span>
+              </div>
+            ) : (
+              <div className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-[11px] sm:text-xs font-medium text-slate-400">
+                <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+                <span className="hidden xs:inline">0 Shuttles Online</span>
+                <span className="xs:hidden">0 Online</span>
               </div>
             )}
           </div>

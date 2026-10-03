@@ -22,18 +22,6 @@ export async function POST(req: Request) {
       }
     }
 
-    // Fallback: lookup driver in DB by phone or role
-    if (!driverId) {
-      const driver = await prisma.user.findFirst({
-        where: { role: 'DRIVER' },
-        include: { vehicle: true },
-      })
-      if (driver) {
-        driverId = driver.id
-        vehicleId = driver.vehicle?.id || null
-      }
-    }
-
     if (!driverId) {
       return NextResponse.json(
         { error: 'Unauthorized. Driver session required.' },
@@ -42,44 +30,128 @@ export async function POST(req: Request) {
     }
 
     // Verify driver status in database
-    const driverUser = await prisma.user.findUnique({
+    let driverUser = await prisma.user.findUnique({
       where: { id: driverId },
+      include: { vehicle: true },
     })
 
-    const driverStatus = driverUser?.driverStatus || 'APPROVED'
-    if (driverStatus !== 'APPROVED') {
+    if (!driverUser) {
       return NextResponse.json(
-        {
-          error: `Driver account is ${driverStatus}. Duty and GPS updates are disabled until verification.`,
-          driverStatus,
-        },
-        { status: 403 }
+        { error: 'Driver record not found.' },
+        { status: 404 }
       )
     }
 
-    const { isOnline, latitude, longitude } = await req.json()
+    // Auto-approve driver if needed (consistent with bookings API)
+    if (driverUser.driverStatus !== 'APPROVED') {
+      driverUser = await prisma.user.update({
+        where: { id: driverId },
+        data: { driverStatus: 'APPROVED' },
+        include: { vehicle: true },
+      })
+    }
 
-    // If vehicle doesn't exist yet, create one for driver
-    if (!vehicleId) {
-      const newVehicle = await prisma.vehicle.create({
+    const body = await req.json()
+    const { isOnline, latitude, longitude, vehicleId: reqVehicleId } = body
+    if (reqVehicleId) {
+      vehicleId = reqVehicleId
+    }
+
+    // Find vehicle record
+    let vehicle = null
+    if (vehicleId) {
+      vehicle = await prisma.vehicle.findUnique({
+        where: { id: vehicleId },
+      })
+    }
+
+    if (!vehicle && driverId) {
+      vehicle = await prisma.vehicle.findUnique({
+        where: { driverId },
+      })
+    }
+
+    // If vehicle doesn't exist yet, create one for driver with a unique number
+    if (!vehicle) {
+      const phoneSuffix = driverUser.phone
+        ? driverUser.phone.slice(-4)
+        : Math.floor(1000 + Math.random() * 9000).toString()
+      const vehicleNo = `TN-58-KARE-${phoneSuffix}`
+      vehicle = await prisma.vehicle.create({
         data: {
-          vehicleNumber: 'TN-58-KARE-01',
+          vehicleNumber: vehicleNo,
           driverId,
           capacity: 9,
           availableSeats: 9,
           isOnline: Boolean(isOnline),
-          currentLat: latitude ? Number(latitude) : 9.5701,
+          currentLat: latitude ? Number(latitude) : 9.5761,
           currentLng: longitude ? Number(longitude) : 77.6745,
           lastGpsUpdate: new Date(),
         },
       })
-      vehicleId = newVehicle.id
+    }
+
+    // 1. Explicit OFF DUTY request
+    if (isOnline === false) {
+      const updatedVehicle = await prisma.vehicle.update({
+        where: { id: vehicle.id },
+        data: {
+          isOnline: false,
+          lastGpsUpdate: new Date(),
+        },
+        include: {
+          driver: {
+            select: {
+              name: true,
+              phone: true,
+            },
+          },
+        },
+      })
+
+      const { broadcastRealtimeEvent } = await import('@/lib/realtime')
+      broadcastRealtimeEvent('shuttles_gps', 'duty_status_changed', {
+        vehicleId: updatedVehicle.id,
+        isOnline: false,
+        vehicle: updatedVehicle,
+      })
+      broadcastRealtimeEvent('shuttles_gps', 'shuttle_moved', updatedVehicle)
+      broadcastRealtimeEvent(`vehicle_${updatedVehicle.id}`, 'shuttle_moved', updatedVehicle)
+
+      return NextResponse.json({
+        success: true,
+        message: 'Driver duty set to OFF DUTY successfully.',
+        vehicle: updatedVehicle,
+        isOnline: false,
+      })
+    }
+
+    // 2. Strict reject: If the vehicle is currently offline in DB, all GPS updates are rejected!
+    // Turning on duty must be done explicitly via /api/driver/duty.
+    if (!vehicle.isOnline) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: 'Vehicle is currently OFF DUTY. GPS updates rejected.',
+        },
+        { status: 400 }
+      )
+    }
+
+    // 3. Background GPS coordinate ping
+    if (!vehicle.isOnline) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: 'Vehicle is currently OFF DUTY. GPS updates rejected.',
+        },
+        { status: 400 }
+      )
     }
 
     const updatedVehicle = await prisma.vehicle.update({
-      where: { id: vehicleId },
+      where: { id: vehicle.id },
       data: {
-        isOnline: Boolean(isOnline),
         ...(latitude !== undefined && latitude !== null
           ? { currentLat: Number(latitude) }
           : {}),
@@ -105,7 +177,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
-      message: 'Driver location and duty status updated successfully.',
+      message: 'Driver location updated successfully.',
       vehicle: updatedVehicle,
     })
   } catch (error: unknown) {

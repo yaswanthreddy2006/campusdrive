@@ -1209,14 +1209,20 @@ export default function DriverMap({
         
         {/* Left: Satellite & Telemetry Badge */}
         <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl bg-slate-950/85 border border-slate-800 backdrop-blur-md text-[10px] sm:text-[11px] font-semibold text-slate-200 shadow-xl pointer-events-auto">
-          <span className="flex h-2 w-2 relative shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-          </span>
+          {shuttles.length > 0 ? (
+            <span className="flex h-2 w-2 relative shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+          ) : (
+            <span className="h-2 w-2 rounded-full bg-slate-500 shrink-0"></span>
+          )}
           <span className="text-blue-400 font-bold hidden xs:inline">KARE Satellite</span>
           <span className="text-slate-500 hidden xs:inline">•</span>
           <span className="text-slate-300 font-mono text-[9px] sm:text-[10px] truncate">
-            {shuttles.length} Shuttle{shuttles.length !== 1 ? 's' : ''} Online
+            {shuttles.length > 0
+              ? `${shuttles.length} Shuttle${shuttles.length !== 1 ? 's' : ''} Online`
+              : '0 Shuttles Online'}
           </span>
         </div>
 
@@ -1316,18 +1322,22 @@ export default function DriverMap({
           <div className="min-w-0 flex flex-col">
             <div className="flex items-center gap-1.5">
               <span className="font-extrabold text-[11px] sm:text-xs text-white truncate">
-                {trackedShuttle ? trackedShuttle.vehicleNumber : 'Searching Shuttles...'}
+                {trackedShuttle ? trackedShuttle.vehicleNumber : '0 Shuttles Online'}
               </span>
-              {trackedShuttle && (
+              {trackedShuttle ? (
                 <span className="text-[9px] px-1.5 py-0.2 rounded-md bg-emerald-500/15 text-emerald-400 font-mono font-bold shrink-0">
                   LIVE
+                </span>
+              ) : (
+                <span className="text-[9px] px-1.5 py-0.2 rounded-md bg-slate-800 text-slate-400 font-mono font-bold shrink-0">
+                  OFFLINE
                 </span>
               )}
             </div>
             <p className="text-[9px] sm:text-[10px] text-slate-400 truncate">
               {trackedShuttle
                 ? `Driver: ${trackedShuttle.driver.name} • ${trackedShuttle.availableSeats}/${trackedShuttle.capacity} Seats`
-                : 'Connecting to campus telemetry feed...'}
+                : 'No shuttles currently on campus duty'}
             </p>
           </div>
         </div>

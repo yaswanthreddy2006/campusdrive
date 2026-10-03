@@ -7,34 +7,44 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request) {
   try {
-    const cookieStore = cookies()
-    const sessionCookie = cookieStore.get('driver_session')
-
-    let driverId: string | null = null
     let vehicleId: string | null = null
+    let driverId: string | null = null
 
-    if (sessionCookie?.value) {
-      try {
-        const parsed = JSON.parse(sessionCookie.value)
-        driverId = parsed.id
-        vehicleId = parsed.vehicleId
-      } catch (err) {
-        console.error('Failed to parse driver session during logout:', err)
-      }
-    }
-
-    // Also check if payload has driverId/vehicleId
+    // 1. Try reading body if present (e.g. from sendBeacon)
     try {
-      const body = await req.json().catch(() => null)
-      if (body) {
-        if (body.driverId) driverId = body.driverId
-        if (body.vehicleId) vehicleId = body.vehicleId
+      const text = await req.text()
+      if (text) {
+        try {
+          const parsed = JSON.parse(text)
+          if (parsed.vehicleId) vehicleId = parsed.vehicleId
+          if (parsed.driverId) driverId = parsed.driverId
+        } catch {
+          // If body is raw vehicleId string
+          if (text.startsWith('cmu') || text.length > 10) {
+            vehicleId = text.trim()
+          }
+        }
       }
     } catch {
-      // Body parsing optional
+      // Body reading optional
     }
 
-    if (driverId || vehicleId) {
+    // 2. Try reading session cookie
+    if (!vehicleId && !driverId) {
+      const cookieStore = cookies()
+      const sessionCookie = cookieStore.get('driver_session')
+      if (sessionCookie?.value) {
+        try {
+          const parsed = JSON.parse(sessionCookie.value)
+          driverId = parsed.id
+          vehicleId = parsed.vehicleId
+        } catch {
+          // Session cookie parsing fallback
+        }
+      }
+    }
+
+    if (vehicleId || driverId) {
       let vehicle = null
       if (vehicleId) {
         vehicle = await prisma.vehicle.findUnique({
@@ -66,7 +76,6 @@ export async function POST(req: Request) {
           },
         })
 
-        // Instant real-time broadcast to students that this driver is OFFLINE
         broadcastRealtimeEvent('shuttles_gps', 'shuttle_moved', updatedVehicle)
         broadcastRealtimeEvent('shuttles_gps', 'duty_status_changed', {
           vehicleId: updatedVehicle.id,
@@ -74,23 +83,14 @@ export async function POST(req: Request) {
           vehicle: updatedVehicle,
         })
         broadcastRealtimeEvent(`vehicle_${updatedVehicle.id}`, 'shuttle_moved', updatedVehicle)
+
+        return NextResponse.json({ success: true, vehicleId: updatedVehicle.id, isOnline: false })
       }
     }
 
-    cookieStore.delete('driver_session')
-
-    return NextResponse.json({
-      success: true,
-      message: 'Logged out driver and set vehicle to OFF DUTY successfully.',
-    })
+    return NextResponse.json({ success: false, error: 'Vehicle not identified.' }, { status: 400 })
   } catch (error) {
-    console.error('Error during driver logout:', error)
-    const cookieStore = cookies()
-    cookieStore.delete('driver_session')
-    return NextResponse.json({
-      success: true,
-      message: 'Driver session cleared.',
-    })
+    console.error('Error setting driver offline via beacon:', error)
+    return NextResponse.json({ success: false, error: 'Internal error' }, { status: 500 })
   }
 }
-

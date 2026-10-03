@@ -5,9 +5,35 @@ export const dynamic = 'force-dynamic'
 
 export async function GET() {
   try {
-    let shuttles = await prisma.vehicle.findMany({
+    // Heartbeat Staleness Watchdog (Telemetry Reaper):
+    // If no GPS/heartbeat received in the last 15 seconds,
+    // automatically drop vehicle to offline status in database.
+    const STALE_CUTOFF_MS = 15 * 1000
+    const staleCutoff = new Date(Date.now() - STALE_CUTOFF_MS)
+
+    await prisma.vehicle.updateMany({
       where: {
         isOnline: true,
+        OR: [
+          { lastGpsUpdate: { lt: staleCutoff } },
+          { lastGpsUpdate: null },
+        ],
+      },
+      data: {
+        isOnline: false,
+      },
+    })
+
+    // Query ONLY vehicles matching: isOnline: true, lastGpsUpdate within 15s, and driver APPROVED
+    const shuttles = await prisma.vehicle.findMany({
+      where: {
+        isOnline: true,
+        lastGpsUpdate: {
+          gte: staleCutoff,
+        },
+        driver: {
+          driverStatus: 'APPROVED',
+        },
       },
       include: {
         driver: {
@@ -22,38 +48,10 @@ export async function GET() {
       },
     })
 
-    // Fallback: If no vehicle is marked online, retrieve or activate the registered campus shuttle
-    if (shuttles.length === 0) {
-      const anyVehicle = await prisma.vehicle.findFirst({
-        include: {
-          driver: {
-            select: { name: true, phone: true },
-          },
-        },
-      })
-      if (anyVehicle) {
-        const activated = await prisma.vehicle.update({
-          where: { id: anyVehicle.id },
-          data: {
-            isOnline: true,
-            currentLat: anyVehicle.currentLat ?? 9.5761,
-            currentLng: anyVehicle.currentLng ?? 77.6833,
-            lastGpsUpdate: new Date(),
-          },
-          include: {
-            driver: {
-              select: { name: true, phone: true },
-            },
-          },
-        })
-        shuttles = [activated]
-      }
-    }
-
     return NextResponse.json({
       success: true,
       count: shuttles.length,
-      shuttles,
+      shuttles: shuttles || [],
     })
   } catch (error: unknown) {
     console.error('Error fetching active shuttles:', error)

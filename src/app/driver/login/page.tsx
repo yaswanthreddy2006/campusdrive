@@ -43,6 +43,10 @@ export default function DriverLoginPage() {
         throw new Error(data.error || 'Authentication failed.')
       }
 
+      if (data.driver?.vehicleId && typeof window !== 'undefined') {
+        sessionStorage.setItem('driver_tab_vehicle_id', data.driver.vehicleId)
+      }
+
       setSuccess('Authentication successful! Redirecting to Driver Portal...')
       setTimeout(() => {
         router.push('/driver/dashboard')

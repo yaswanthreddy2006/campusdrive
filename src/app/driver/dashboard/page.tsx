@@ -24,6 +24,7 @@ import {
   Check,
   X,
   Phone,
+  Loader2,
 } from 'lucide-react'
 
 const PaymentModal = dynamic(() => import('@/components/PaymentModal'), { ssr: false })
@@ -74,6 +75,7 @@ const KARE_SIMULATED_WAYPOINTS = [
 export default function DriverDashboardPage() {
   const router = useRouter()
   const [isOnDuty, setIsOnDuty] = useState(false)
+  const [togglingDuty, setTogglingDuty] = useState(false)
   const [isSimulatingGps, setIsSimulatingGps] = useState(false)
   const [waypointIndex, setWaypointIndex] = useState(0)
   const [locationPromptNeeded, setLocationPromptNeeded] = useState(false)
@@ -95,7 +97,54 @@ export default function DriverDashboardPage() {
   const [respondingBookingId, setRespondingBookingId] = useState<string | null>(null)
 
   const watchIdRef = useRef<number | null>(null)
+  const simIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const heartbeatRef = useRef<NodeJS.Timeout | null>(null)
   const prevRequestedCountRef = useRef(0)
+  const isOnDutyRef = useRef(isOnDuty)
+  const vehicleIdRef = useRef<string | null>(null)
+
+  const stopBroadcasting = useCallback(() => {
+    if (simIntervalRef.current) {
+      clearInterval(simIntervalRef.current)
+      simIntervalRef.current = null
+    }
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current)
+      heartbeatRef.current = null
+    }
+    if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.clearWatch(watchIdRef.current)
+      watchIdRef.current = null
+    }
+    setIsSimulatingGps(false)
+  }, [])
+
+  // Kill all intervals and watchers on component unmount
+  useEffect(() => {
+    return () => {
+      stopBroadcasting()
+    }
+  }, [stopBroadcasting])
+
+  useEffect(() => {
+    isOnDutyRef.current = isOnDuty
+  }, [isOnDuty])
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const stored = sessionStorage.getItem('driver_tab_vehicle_id')
+      if (stored) vehicleIdRef.current = stored
+    }
+  }, [])
+
+  useEffect(() => {
+    if (vehicle?.id) {
+      vehicleIdRef.current = vehicle.id
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem('driver_tab_vehicle_id', vehicle.id)
+      }
+    }
+  }, [vehicle?.id])
 
   // Web Audio chime for incoming student booking requests
   const playNotificationAlert = useCallback(() => {
@@ -119,14 +168,19 @@ export default function DriverDashboardPage() {
     }
   }, [])
 
-  // Send GPS location to server
+  // Send GPS location to server (Only when ON DUTY)
   const broadcastLocation = useCallback(async (lat: number, lng: number, onlineStatus: boolean) => {
+    // HARD GUARD: If the driver is off duty, completely discard any background GPS broadcast!
+    if (!isOnDutyRef.current) {
+      return
+    }
     try {
+      const activeVehicleId = vehicleIdRef.current || (typeof window !== 'undefined' ? sessionStorage.getItem('driver_tab_vehicle_id') : null)
       const res = await fetch('/api/driver/location', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          isOnline: onlineStatus,
+          vehicleId: activeVehicleId,
           latitude: lat,
           longitude: lng,
         }),
@@ -147,7 +201,13 @@ export default function DriverDashboardPage() {
   // Fetch driver assigned vehicle and bookings
   const fetchDriverData = useCallback(async () => {
     try {
-      const res = await fetch('/api/driver/bookings')
+      const tabVehicleId = typeof window !== 'undefined' ? sessionStorage.getItem('driver_tab_vehicle_id') : null
+      const url = tabVehicleId ? `/api/driver/bookings?vehicleId=${tabVehicleId}` : '/api/driver/bookings'
+      const res = await fetch(url)
+      if (res.status === 401) {
+        router.push('/driver/login')
+        return
+      }
       const data = await res.json()
 
       if (res.status === 403 && data.driverStatus) {
@@ -163,7 +223,21 @@ export default function DriverDashboardPage() {
 
       if (data.vehicle) {
         setVehicle(data.vehicle)
-        setIsOnDuty(data.vehicle.isOnline)
+        vehicleIdRef.current = data.vehicle.id
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('driver_tab_vehicle_id', data.vehicle.id)
+        }
+
+        // STRICT RULE: Only driver can toggle on duty. Never automatically flip duty switch to ON.
+        // If driver is currently OFF DUTY in this session, ensure vehicle in DB is not showing online.
+        if (!isOnDutyRef.current && data.vehicle.isOnline) {
+          fetch('/api/driver/duty', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vehicleId: data.vehicle.id, isOnline: false }),
+          }).catch(() => {})
+        }
+
         if (data.vehicle.currentLat && data.vehicle.currentLng) {
           setCurrentCoords({
             lat: data.vehicle.currentLat,
@@ -177,7 +251,7 @@ export default function DriverDashboardPage() {
     } catch (err) {
       console.error('Error fetching driver data:', err)
     }
-  }, [])
+  }, [router])
 
   useEffect(() => {
     fetchDriverData()
@@ -234,41 +308,93 @@ export default function DriverDashboardPage() {
 
   // Handle On Duty Toggle
   const toggleDuty = async () => {
+    if (togglingDuty) return
     const nextState = !isOnDuty
+    setTogglingDuty(true)
 
-    if (nextState) {
-      if (!isSimulatingGps && 'geolocation' in navigator) {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            const lat = pos.coords.latitude
-            const lng = pos.coords.longitude
-            setCurrentCoords({ lat, lng })
-            setIsOnDuty(true)
-            setLocationPromptNeeded(false)
-            setStatusMsg('On Duty active! Broadcasting real-time device GPS.')
-            broadcastLocation(lat, lng, true)
-          },
-          (err) => {
-            console.warn('Location permission needed:', err)
-            setLocationPromptNeeded(true)
-            setStatusMsg('Location is required. Please turn on device GPS.')
-          },
-          { enableHighAccuracy: true, timeout: 8000 }
-        )
-        return
-      }
+    // Immediate optimistic update so switch changes instantly
+    setIsOnDuty(nextState)
+    isOnDutyRef.current = nextState
+    setVehicle((prev) => (prev ? { ...prev, isOnline: nextState } : prev))
 
-      setIsOnDuty(true)
-      setStatusMsg('On Duty active! Broadcasting real-time GPS coordinates.')
-      broadcastLocation(currentCoords.lat, currentCoords.lng, true)
-    } else {
-      setIsOnDuty(false)
-      setLocationPromptNeeded(false)
-      setStatusMsg('Off Duty. Location broadcasting stopped.')
-      broadcastLocation(currentCoords.lat, currentCoords.lng, false)
-      if (watchIdRef.current !== null) {
-        navigator.geolocation?.clearWatch(watchIdRef.current)
+    const activeVehicleId = vehicleIdRef.current || (typeof window !== 'undefined' ? sessionStorage.getItem('driver_tab_vehicle_id') : null)
+
+    try {
+      if (nextState) {
+        setStatusMsg('On Duty active! Shuttle is online and accepting student requests.')
+        setLocationPromptNeeded(false)
+        await Promise.all([
+          fetch('/api/driver/location', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vehicleId: activeVehicleId,
+              isOnline: true,
+              latitude: currentCoords.lat,
+              longitude: currentCoords.lng,
+            }),
+          }),
+          fetch('/api/driver/duty', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vehicleId: activeVehicleId,
+              isOnline: true,
+              latitude: currentCoords.lat,
+              longitude: currentCoords.lng,
+            }),
+          }),
+        ])
+
+        // Asynchronously check / acquire high-accuracy live device GPS
+        if (!isSimulatingGps && typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              if (!isOnDutyRef.current) return
+              const lat = pos.coords.latitude
+              const lng = pos.coords.longitude
+              setCurrentCoords({ lat, lng })
+              setLocationPromptNeeded(false)
+              setStatusMsg('On Duty active! Broadcasting real-time device GPS.')
+              broadcastLocation(lat, lng, true)
+            },
+            (err) => {
+              console.warn('Location permission info:', err.message)
+              // Driver remains on duty with campus coordinates
+              setStatusMsg('On Duty active with campus base GPS. Turn on device location for live movement.')
+              setLocationPromptNeeded(true)
+            },
+            { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
+          )
+        }
+      } else {
+        stopBroadcasting()
+        setLocationPromptNeeded(false)
+        setStatusMsg('Off Duty. Location broadcasting stopped. Shuttle is offline.')
+        await Promise.all([
+          fetch('/api/driver/location', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vehicleId: activeVehicleId,
+              isOnline: false,
+            }),
+          }),
+          fetch('/api/driver/duty', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vehicleId: activeVehicleId,
+              isOnline: false,
+            }),
+          }),
+        ])
       }
+    } catch (err) {
+      console.error('Error toggling duty status:', err)
+      setStatusMsg('Failed to update duty status on server. Please retry.')
+    } finally {
+      setTogglingDuty(false)
     }
   }
 
@@ -277,6 +403,7 @@ export default function DriverDashboardPage() {
     if (isOnDuty && !isSimulatingGps && 'geolocation' in navigator) {
       watchIdRef.current = navigator.geolocation.watchPosition(
         (pos) => {
+          if (!isOnDutyRef.current) return
           const newLat = pos.coords.latitude
           const newLng = pos.coords.longitude
           setCurrentCoords({ lat: newLat, lng: newLng })
@@ -291,18 +418,29 @@ export default function DriverDashboardPage() {
     }
 
     return () => {
-      if (watchIdRef.current !== null) {
+      if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
         navigator.geolocation?.clearWatch(watchIdRef.current)
+        watchIdRef.current = null
       }
     }
   }, [isOnDuty, isSimulatingGps, broadcastLocation])
 
   // Simulated GPS Movement along KARE Waypoints
   useEffect(() => {
-    let simInterval: NodeJS.Timeout | null = null
+    if (simIntervalRef.current) {
+      clearInterval(simIntervalRef.current)
+      simIntervalRef.current = null
+    }
 
     if (isOnDuty && isSimulatingGps) {
-      simInterval = setInterval(() => {
+      simIntervalRef.current = setInterval(() => {
+        if (!isOnDutyRef.current) {
+          if (simIntervalRef.current) {
+            clearInterval(simIntervalRef.current)
+            simIntervalRef.current = null
+          }
+          return
+        }
         setWaypointIndex((prevIdx) => {
           const nextIdx = (prevIdx + 1) % KARE_SIMULATED_WAYPOINTS.length
           const wp = KARE_SIMULATED_WAYPOINTS[nextIdx]
@@ -314,7 +452,10 @@ export default function DriverDashboardPage() {
     }
 
     return () => {
-      if (simInterval) clearInterval(simInterval)
+      if (simIntervalRef.current) {
+        clearInterval(simIntervalRef.current)
+        simIntervalRef.current = null
+      }
     }
   }, [isOnDuty, isSimulatingGps, broadcastLocation])
 
@@ -327,9 +468,76 @@ export default function DriverDashboardPage() {
     prevRequestedCountRef.current = currentRequested
   }, [bookings, playNotificationAlert])
 
+  // Periodic heartbeat while ON DUTY to keep lastGpsUpdate fresh on server
+  useEffect(() => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current)
+      heartbeatRef.current = null
+    }
+
+    if (!isOnDuty) return
+
+    heartbeatRef.current = setInterval(() => {
+      if (!isOnDutyRef.current) {
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current)
+          heartbeatRef.current = null
+        }
+        return
+      }
+      broadcastLocation(currentCoords.lat, currentCoords.lng, true)
+    }, 10000)
+
+    return () => {
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current)
+        heartbeatRef.current = null
+      }
+    }
+  }, [isOnDuty, currentCoords.lat, currentCoords.lng, broadcastLocation])
+
+  // Broadcast offline beacon if driver closes browser or navigates away
+  useEffect(() => {
+    const handleUnload = () => {
+      if (isOnDuty && vehicle?.id && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+        navigator.sendBeacon('/api/driver/offline', JSON.stringify({ vehicleId: vehicle.id }))
+      }
+    }
+
+    window.addEventListener('beforeunload', handleUnload)
+    window.addEventListener('pagehide', handleUnload)
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload)
+      window.removeEventListener('pagehide', handleUnload)
+    }
+  }, [isOnDuty, vehicle?.id])
+
   const handleLogout = async () => {
-    await fetch('/api/driver/logout', { method: 'POST' })
-    router.push('/driver/login')
+    try {
+      setIsOnDuty(false)
+      isOnDutyRef.current = false
+      stopBroadcasting()
+      const targetVehicleId = vehicleIdRef.current || vehicle?.id || (typeof window !== 'undefined' ? sessionStorage.getItem('driver_tab_vehicle_id') : null)
+      if (targetVehicleId) {
+        await fetch('/api/driver/duty', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vehicleId: targetVehicleId, isOnline: false }),
+        }).catch(() => {})
+      }
+      await fetch('/api/driver/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vehicleId: targetVehicleId }),
+      })
+    } catch (err) {
+      console.error('Error during logout:', err)
+    } finally {
+      if (typeof window !== 'undefined') {
+        sessionStorage.removeItem('driver_tab_vehicle_id')
+      }
+      router.push('/driver/login')
+    }
   }
 
   // Handle Driver Approve / Reject of incoming student booking request (Instant Optimistic Update)
@@ -598,19 +806,36 @@ export default function DriverDashboardPage() {
                           ON DUTY
                         </span>
                       ) : (
-                        <span className="text-slate-400">OFF DUTY</span>
+                        <span className="text-slate-400 flex items-center gap-1.5">
+                          <span className="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+                          OFF DUTY / OFFLINE
+                        </span>
                       )}
                     </h1>
+                    <p className="text-[11px] text-slate-400">
+                      {isOnDuty
+                        ? 'Broadcasting live to students & accepting ride bookings'
+                        : 'Offline • Shuttle is hidden and not bookable by students'}
+                    </p>
                   </div>
 
                   <button
                     id="duty-toggle-switch"
                     onClick={toggleDuty}
-                    className={`w-16 h-9 rounded-full p-1 transition-colors duration-300 flex items-center shrink-0 ${isOnDuty ? 'bg-emerald-500 justify-end' : 'bg-slate-800 justify-start'
-                      }`}
+                    disabled={togglingDuty}
+                    aria-label={isOnDuty ? 'Switch to Off Duty' : 'Switch to On Duty'}
+                    className={`w-16 h-9 rounded-full p-1 transition-all duration-300 flex items-center shrink-0 cursor-pointer ${
+                      isOnDuty
+                        ? 'bg-emerald-500 justify-end shadow-lg shadow-emerald-500/30'
+                        : 'bg-slate-800 justify-start hover:bg-slate-700'
+                    } ${togglingDuty ? 'opacity-70 cursor-wait' : ''}`}
                   >
                     <div className="w-7 h-7 rounded-full bg-white shadow-md flex items-center justify-center text-slate-900 font-bold">
-                      <Power className="w-4 h-4" />
+                      {togglingDuty ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-slate-800" />
+                      ) : (
+                        <Power className={`w-4 h-4 ${isOnDuty ? 'text-emerald-600' : 'text-slate-600'}`} />
+                      )}
                     </div>
                   </button>
                 </div>

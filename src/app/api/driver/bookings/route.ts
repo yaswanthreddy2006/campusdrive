@@ -5,25 +5,37 @@ import { BookingStatus } from '@prisma/client'
 
 export const dynamic = 'force-dynamic'
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
+    const { searchParams } = new URL(req.url)
+    const queryVehicleId = searchParams.get('vehicleId')
+
     const cookieStore = cookies()
     const sessionCookie = cookieStore.get('driver_session')
 
     let driverId: string | null = null
-    let vehicleId: string | null = null
+    let vehicleId: string | null = queryVehicleId || null
 
     if (sessionCookie?.value) {
       try {
         const parsed = JSON.parse(sessionCookie.value)
         driverId = parsed.id
-        vehicleId = parsed.vehicleId
+        if (!vehicleId) {
+          vehicleId = parsed.vehicleId
+        }
       } catch (err) {
         console.error('Failed to parse driver session:', err)
       }
     }
 
-    if (driverId && !vehicleId) {
+    if (!driverId && !queryVehicleId) {
+      return NextResponse.json(
+        { error: 'Unauthorized. Driver session required.' },
+        { status: 401 }
+      )
+    }
+
+    if (!vehicleId && driverId) {
       const driverVehicle = await prisma.vehicle.findUnique({
         where: { driverId },
       })
@@ -32,22 +44,11 @@ export async function GET() {
       }
     }
 
-    if (!driverId || !vehicleId) {
-      const driver = await prisma.user.findFirst({
-        where: { role: 'DRIVER' },
-        include: { vehicle: true },
-        orderBy: [
-          { vehicle: { isOnline: 'desc' } },
-        ],
-      })
-      if (driver) {
-        driverId = driver.id
-        vehicleId = driver.vehicle?.id || null
-      }
-    }
-
-    if (!driverId || !vehicleId) {
-      return NextResponse.json({ bookings: [], vehicle: null })
+    if (!vehicleId) {
+      return NextResponse.json(
+        { error: 'Driver vehicle not found.' },
+        { status: 404 }
+      )
     }
 
     const vehicle = await prisma.vehicle.findUnique({

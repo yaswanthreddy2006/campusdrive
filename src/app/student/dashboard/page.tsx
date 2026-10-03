@@ -188,11 +188,11 @@ export default function StudentDashboardPage() {
     fetchStudentBookings()
     fetchActiveShuttles()
 
-    // Relaxed background heartbeat (12s) while real-time SSE delivers instant sub-second events!
+    // Background sync heartbeat (6s) while real-time SSE delivers instant sub-second events!
     const interval = setInterval(() => {
       fetchActiveShuttles()
       fetchStudentBookings()
-    }, 12000)
+    }, 6000)
 
     return () => clearInterval(interval)
   }, [])
@@ -216,22 +216,36 @@ export default function StudentDashboardPage() {
               setActiveBooking(msg.data)
             }
             fetchStudentBookings()
+          } else if (msg.event === 'duty_status_changed') {
+            if (msg.data && msg.data.isOnline === false && msg.data.vehicleId) {
+              setActiveShuttles((prev) => prev.filter((s) => s.id !== msg.data.vehicleId))
+            }
+            fetchActiveShuttles()
           } else if (msg.event === 'seats_updated') {
             fetchActiveShuttles()
           } else if (msg.event === 'shuttle_moved' && msg.data) {
             const moved = msg.data
-            setActiveShuttles((prev) =>
-              prev.map((s) =>
-                s.id === moved.id
-                  ? {
-                      ...s,
-                      currentLat: moved.currentLat,
-                      currentLng: moved.currentLng,
-                      availableSeats: moved.availableSeats ?? s.availableSeats,
-                    }
-                  : s
-              )
-            )
+            if (moved.isOnline === false) {
+              setActiveShuttles((prev) => prev.filter((s) => s.id !== moved.id))
+            } else {
+              setActiveShuttles((prev) => {
+                const exists = prev.some((s) => s.id === moved.id)
+                if (!exists) {
+                  fetchActiveShuttles()
+                  return prev
+                }
+                return prev.map((s) =>
+                  s.id === moved.id
+                    ? {
+                        ...s,
+                        currentLat: moved.currentLat,
+                        currentLng: moved.currentLng,
+                        availableSeats: moved.availableSeats ?? s.availableSeats,
+                      }
+                    : s
+                )
+              })
+            }
           }
         } catch {
           // Resilient stream handling
@@ -549,6 +563,37 @@ export default function StudentDashboardPage() {
           {/* Left Column: Map & Active Ticket */}
           <div className="lg:col-span-7 space-y-5">
 
+            {/* When No Drivers Available */}
+            {activeShuttles.length === 0 && (
+              <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-amber-500/30 shadow-2xl space-y-3 animate-fadeIn">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 font-bold shrink-0">
+                      <Bus className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-extrabold text-sm sm:text-base text-white truncate">
+                          No shuttles currently on campus duty
+                        </h3>
+                        <span className="text-[9px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 font-bold flex items-center gap-1 shrink-0 uppercase">
+                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                          0 Shuttles Online
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 truncate">
+                        All campus shuttle drivers are currently off duty.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="p-3 rounded-2xl bg-slate-950/80 border border-slate-800/80 text-xs text-slate-300 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0"></span>
+                  <span>Live GPS tracking and ride reservations will activate as soon as a driver comes on duty.</span>
+                </div>
+              </div>
+            )}
+
             {/* Live Driver Telemetry & Contact Card for Students */}
             {selectedShuttle && (
               <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-amber-500/40 shadow-2xl space-y-3.5 animate-fadeIn">
@@ -653,10 +698,20 @@ export default function StudentDashboardPage() {
                   <MapPin className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                   Live Satellite GPS Shuttle Tracking
                 </h2>
-                <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-                  Telemetry active (5s)
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                    activeShuttles.length > 0
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                      : 'bg-slate-800 border-slate-700 text-slate-400'
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${activeShuttles.length > 0 ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`}></span>
+                    {activeShuttles.length > 0 ? `${activeShuttles.length} Shuttles Online` : '0 Shuttles Online'}
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-medium hidden sm:flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                    Telemetry active (5s)
+                  </span>
+                </div>
               </div>
 
               <DriverMap
@@ -1020,11 +1075,24 @@ export default function StudentDashboardPage() {
                   </p>
                 </div>
 
+                {/* No Driver Available Alert */}
+                {activeShuttles.length === 0 && (
+                  <div className="flex items-start gap-2.5 p-3.5 rounded-2xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-xs animate-fadeIn">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="font-semibold text-white">No Shuttle Driver Available Now</p>
+                      <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                        All campus shuttle drivers are currently off duty. Seat reservations are paused and will automatically open as soon as a driver signs on duty.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {/* Submit Button */}
                 <button
                   id="confirm-booking-btn"
                   type="submit"
-                  disabled={submitting || isSameLocation || loadingLocations}
+                  disabled={submitting || isSameLocation || loadingLocations || activeShuttles.length === 0}
                   className="w-full py-3.5 px-6 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm transition-all duration-200 shadow-xl shadow-indigo-950/50 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {submitting ? (
@@ -1032,9 +1100,14 @@ export default function StudentDashboardPage() {
                       <Loader2 className="w-4 h-4 animate-spin" />
                       Reserving Seat...
                     </>
+                  ) : activeShuttles.length === 0 ? (
+                    <>
+                      <Bus className="w-4 h-4 opacity-60" />
+                      <span>Reserve Shuttle Seats (No Shuttles on Duty)</span>
+                    </>
                   ) : (
                     <>
-                      <span>Confirm Seat Reservation</span>
+                      <span>Reserve Shuttle Seats</span>
                       <ArrowRight className="w-4 h-4 shrink-0" />
                     </>
                   )}

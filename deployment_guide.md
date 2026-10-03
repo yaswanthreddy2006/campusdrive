@@ -10,7 +10,7 @@ Add these under **Project Settings > Environment Variables** in Vercel. Apply th
 | :--- | :--- | :--- |
 | `DATABASE_URL` | PostgreSQL connection string from your database provider | Use the provider's connection string; prefer its pooled/serverless URL for application traffic |
 | `NEXTAUTH_SECRET` | Secret used to encrypt NextAuth sessions | Generate a unique secret, for example with `openssl rand -base64 32` |
-| `NEXTAUTH_URL` | Canonical URL of the deployed app | `https://your-project.vercel.app` (or your custom domain) |
+| `NEXTAUTH_URL` | Canonical URL of the deployed app | `https://campusdrive-nu.vercel.app` (or your custom domain) |
 | `GOOGLE_CLIENT_ID` | Google OAuth Client ID for student login | `123456789-abc.apps.googleusercontent.com` |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth Client Secret | `GOCSPX-xyz123abc` |
 
@@ -27,7 +27,7 @@ npx prisma db push
 After deployment, initialize campus locations using the seed endpoint if needed:
 
 ```bash
-curl -X POST https://your-project.vercel.app/api/locations/seed
+curl -X POST https://campusdrive-nu.vercel.app/api/locations/seed
 ```
 
 For subsequent schema changes, create and commit Prisma migrations and use `prisma migrate deploy` rather than relying on repeated production `db push` runs.
@@ -41,10 +41,12 @@ Import the repository into Vercel and keep the detected **Next.js** framework pr
 In Google Cloud Console, add the deployed domain's callback URL under **Authorized redirect URIs**:
 
 ```text
-https://your-project.vercel.app/api/auth/callback/google
+https://campusdrive-nu.vercel.app/api/auth/callback/google
 ```
 
 Add the equivalent callback URL for any custom domain and ensure the OAuth consent screen is configured for the intended users.
+
+If Google redirects to `http://localhost:3000/api/auth/callback/google` in production, check that Vercel's **Production** `NEXTAUTH_URL` is exactly `https://campusdrive-nu.vercel.app` and that Google Cloud's authorized redirect URI is exactly `https://campusdrive-nu.vercel.app/api/auth/callback/google`. Remove the localhost callback from the production OAuth client if it is not needed, save the settings, and redeploy after changing Vercel environment variables.
 
 ## 5. Realtime Deployment Note
 

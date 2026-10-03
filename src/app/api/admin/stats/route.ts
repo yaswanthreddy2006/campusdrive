@@ -37,14 +37,35 @@ export async function GET() {
     })
     const dailyTotalRevenue = dailyRevenueResult._sum.fareAmount || 0
 
-    // 3. Total Active Autos on Duty
+    // Telemetry Watchdog: vehicles with no GPS update in last 15s drop to offline
+    const STALE_CUTOFF_MS = 15 * 1000
+    const staleCutoff = new Date(Date.now() - STALE_CUTOFF_MS)
+
+    await prisma.vehicle.updateMany({
+      where: {
+        isOnline: true,
+        OR: [
+          { lastGpsUpdate: { lt: staleCutoff } },
+          { lastGpsUpdate: null },
+        ],
+      },
+      data: { isOnline: false },
+    })
+
+    // 3. Total Active Autos on Duty (strictly isOnline: true and telemetry within 30s)
     const totalActiveAutosOnDuty = await prisma.vehicle.count({
-      where: { isOnline: true },
+      where: {
+        isOnline: true,
+        lastGpsUpdate: { gte: staleCutoff },
+      },
     })
 
     // 4. Overall Campus Seat Capacity Utilization %
     const activeVehicles = await prisma.vehicle.findMany({
-      where: { isOnline: true },
+      where: {
+        isOnline: true,
+        lastGpsUpdate: { gte: staleCutoff },
+      },
     })
 
     let totalCapacity = 0

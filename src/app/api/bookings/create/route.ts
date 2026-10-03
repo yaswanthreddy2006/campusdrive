@@ -65,15 +65,18 @@ export async function POST(req: Request) {
     const bookingResult = await prisma.$transaction(async (tx) => {
       let vehicle = null
 
-      // If student picked a specific vehicle/driver, prioritize it
+      // If student picked a specific vehicle/driver, prioritize it if online
       if (requestedVehicleId) {
-        vehicle = await tx.vehicle.findUnique({
+        const target = await tx.vehicle.findUnique({
           where: { id: requestedVehicleId },
           include: { driver: true },
         })
+        if (target && target.isOnline) {
+          vehicle = target
+        }
       }
 
-      // If no specific vehicle requested or vehicle not found, query online vehicle with seats
+      // If no specific online vehicle requested or vehicle not found, query online vehicle with seats
       if (!vehicle || vehicle.availableSeats < numSeats) {
         vehicle = await tx.vehicle.findFirst({
           where: {
@@ -89,44 +92,16 @@ export async function POST(req: Request) {
         })
       }
 
-      // Fallback: query any active vehicle in system
-      if (!vehicle) {
-        vehicle = await tx.vehicle.findFirst({
-          where: {
-            availableSeats: {
-              gte: numSeats,
-            },
-          },
-          include: { driver: true },
-          orderBy: {
-            availableSeats: 'desc',
-          },
-        })
+      // Check if an online vehicle is available
+      if (!vehicle || !vehicle.isOnline) {
+        throw new Error('No shuttle driver is available now. Please try again when a driver comes on duty.')
       }
 
-      // If still no vehicle found, fallback to first vehicle in DB
-      if (!vehicle) {
-        vehicle = await tx.vehicle.findFirst({
-          include: { driver: true },
-        })
-      }
-
-      if (!vehicle) {
-        throw new Error('No available shuttle vehicles registered in system.')
-      }
-
-      // Ensure vehicle is online and driver is approved (only update if not already set to save DB trips)
+      // Ensure driver is approved
       if (vehicle.driver && vehicle.driver.driverStatus !== 'APPROVED') {
         await tx.user.update({
           where: { id: vehicle.driver.id },
           data: { driverStatus: 'APPROVED' },
-        })
-      }
-
-      if (!vehicle.isOnline) {
-        await tx.vehicle.update({
-          where: { id: vehicle.id },
-          data: { isOnline: true },
         })
       }
 

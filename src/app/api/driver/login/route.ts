@@ -42,7 +42,7 @@ export async function POST(req: Request) {
               vehicleNumber: 'TN-58-KARE-01',
               capacity: 9,
               availableSeats: 9,
-              isOnline: true,
+              isOnline: false,
             },
           },
         },
@@ -82,6 +82,14 @@ export async function POST(req: Request) {
         { error: 'Invalid 4-digit PIN. Please try again.' },
         { status: 401 }
       )
+    }
+
+    // Ensure vehicle always starts OFF DUTY upon login until driver explicitly toggles it on
+    if (driver.vehicle?.id || driver.id) {
+      await prisma.vehicle.updateMany({
+        where: driver.vehicle?.id ? { id: driver.vehicle.id } : { driverId: driver.id },
+        data: { isOnline: false },
+      })
     }
 
     // Set Driver Session Cookie
