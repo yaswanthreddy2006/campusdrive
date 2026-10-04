@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
-import { cookies } from 'next/headers'
 
 export async function POST(req: Request) {
   try {
@@ -104,8 +103,13 @@ export async function POST(req: Request) {
       vehicleNumber: driver.vehicle?.vehicleNumber || null,
     }
 
-    const cookieStore = cookies()
-    cookieStore.set('driver_session', JSON.stringify(driverPayload), {
+    const response = NextResponse.json({
+      success: true,
+      message: 'Driver authenticated successfully.',
+      driver: driverPayload,
+    })
+
+    response.cookies.set('driver_session', JSON.stringify(driverPayload), {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -113,11 +117,14 @@ export async function POST(req: Request) {
       maxAge: 60 * 60 * 24 * 7, // 7 days
     })
 
-    return NextResponse.json({
-      success: true,
-      message: 'Driver authenticated successfully.',
-      driver: driverPayload,
+    response.cookies.set('last_role', 'driver', {
+      path: '/',
+      maxAge: 31536000, // 1 year
+      expires: new Date(Date.now() + 31536000 * 1000),
+      sameSite: 'lax',
     })
+
+    return response
   } catch (error: unknown) {
     console.error('Driver login API error:', error)
     return NextResponse.json(
