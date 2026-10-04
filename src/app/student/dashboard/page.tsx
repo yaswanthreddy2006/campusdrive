@@ -75,6 +75,13 @@ function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2:
 export default function StudentDashboardPage() {
   const { data: session, status: authStatus } = useSession()
 
+  // Safely persist last_role=student once student session is active
+  useEffect(() => {
+    if (authStatus === 'authenticated' && session?.user && typeof document !== 'undefined') {
+      document.cookie = 'last_role=student; path=/; max-age=31536000; SameSite=Lax'
+    }
+  }, [authStatus, session?.user])
+
   const [locations, setLocations] = useState<LocationItem[]>([])
   const [pickupId, setPickupId] = useState<string>('')
   const [dropId, setDropId] = useState<string>('')
