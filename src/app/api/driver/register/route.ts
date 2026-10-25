@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { adminAuth } from '@/lib/firebaseAdmin'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(req: Request) {
   try {
     const { name, phone, idToken, vehicleName, vehicleNumber, mpin } = await req.json()
