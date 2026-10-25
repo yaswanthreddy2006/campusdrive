@@ -3,17 +3,32 @@ import prisma from '@/lib/prisma'
 
 export async function POST(req: Request) {
   try {
-    const { phone, pin } = await req.json()
+    const { phone, pin, mpin } = await req.json()
 
-    if (!phone || !pin) {
+    if (!phone) {
       return NextResponse.json(
-        { error: 'Mobile number and 4-digit PIN are required.' },
+        { error: 'Mobile number is required.' },
         { status: 400 }
       )
     }
 
-    const cleanPhone = phone.trim()
-    const cleanPin = pin.trim()
+    const cleanPhone = phone.replace(/\D/g, '').slice(-10)
+
+    if (cleanPhone.length < 10) {
+      return NextResponse.json(
+        { error: 'Please enter a valid 10-digit mobile number.' },
+        { status: 400 }
+      )
+    }
+
+    const inputPin = (mpin || pin || '').trim()
+
+    if (!inputPin || inputPin.length !== 4) {
+      return NextResponse.json(
+        { error: 'Please enter your 4-digit M-PIN.' },
+        { status: 400 }
+      )
+    }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let driver: any = await prisma.user.findFirst({
@@ -26,8 +41,8 @@ export async function POST(req: Request) {
       },
     })
 
-    // In development/test mode, auto-seed demo driver if phone is 9876543210 and PIN is 1234
-    if (!driver && cleanPhone === '9876543210' && cleanPin === '1234') {
+    // Auto-seed demo driver in test mode if 9876543210 and 1234
+    if (!driver && cleanPhone === '9876543210' && inputPin === '1234') {
       driver = await prisma.user.create({
         data: {
           name: 'Selvam (KARE Shuttle Driver)',
@@ -52,34 +67,48 @@ export async function POST(req: Request) {
     }
 
     if (!driver) {
-      // Auto-create new driver with PENDING verification status upon first login attempt
-      const driverEmail = `driver.${cleanPhone}@klu.ac.in`
-      const vehicleNo = `TN-58-KARE-${cleanPhone.slice(-2)}`
-      driver = await prisma.user.create({
-        data: {
-          name: `Driver (${cleanPhone.slice(-4)})`,
-          email: driverEmail,
-          phone: cleanPhone,
-          pin: cleanPin,
-          role: 'DRIVER',
+      return NextResponse.json(
+        {
+          error: `No driver account found with mobile number ${cleanPhone}. Please register as a new driver first.`,
+          notRegistered: true,
+        },
+        { status: 404 }
+      )
+    }
+
+    // Verify 4-digit M-PIN
+    if (driver.pin !== inputPin) {
+      return NextResponse.json(
+        { error: 'Incorrect 4-digit M-PIN. Please try again.' },
+        { status: 401 }
+      )
+    }
+
+    // Check Admin Approval Status
+    const driverStatus = driver.driverStatus || 'PENDING'
+
+    if (driverStatus === 'PENDING') {
+      return NextResponse.json(
+        {
+          error: 'Your driver account is pending Admin approval. Please wait until campus operations approves your registration.',
           driverStatus: 'PENDING',
-          vehicle: {
-            create: {
-              vehicleNumber: vehicleNo,
-              capacity: 9,
-              availableSeats: 9,
-              isOnline: false,
-            },
+          driver: {
+            name: driver.name,
+            phone: driver.phone,
+            vehicleNumber: driver.vehicle?.vehicleNumber,
           },
         },
-        include: {
-          vehicle: true,
-        },
-      })
-    } else if (driver.pin !== cleanPin) {
+        { status: 403 }
+      )
+    }
+
+    if (driverStatus === 'REJECTED') {
       return NextResponse.json(
-        { error: 'Invalid 4-digit PIN. Please try again.' },
-        { status: 401 }
+        {
+          error: 'Your driver registration was rejected by the administrator. Please contact KARE operations.',
+          driverStatus: 'REJECTED',
+        },
+        { status: 403 }
       )
     }
 
@@ -92,7 +121,6 @@ export async function POST(req: Request) {
     }
 
     // Set Driver Session Cookie
-    const driverStatus = driver.driverStatus || 'APPROVED'
     const driverPayload = {
       id: driver.id,
       name: driver.name,

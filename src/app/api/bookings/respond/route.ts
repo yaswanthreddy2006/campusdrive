@@ -17,9 +17,14 @@ export async function POST(req: Request) {
     }
 
     const normalizedAction = String(action).toUpperCase()
-    if (normalizedAction !== 'APPROVE' && normalizedAction !== 'ACCEPT' && normalizedAction !== 'REJECT') {
+    if (
+      normalizedAction !== 'APPROVE' &&
+      normalizedAction !== 'ACCEPT' &&
+      normalizedAction !== 'REJECT' &&
+      normalizedAction !== 'CANCEL'
+    ) {
       return NextResponse.json(
-        { error: 'Action must be APPROVE or REJECT.' },
+        { error: 'Action must be APPROVE, ACCEPT, REJECT, or CANCEL.' },
         { status: 400 }
       )
     }
@@ -39,11 +44,15 @@ export async function POST(req: Request) {
         throw new Error('Booking record not found.')
       }
 
-      if (booking.status !== BookingStatus.REQUESTED) {
-        throw new Error(`Booking is already ${booking.status.toLowerCase()} and cannot be updated.`)
+      if (booking.status === BookingStatus.COMPLETED || booking.status === BookingStatus.CANCELLED) {
+        throw new Error(`Booking is already ${booking.status.toLowerCase()} and cannot be modified.`)
       }
 
       if (normalizedAction === 'APPROVE' || normalizedAction === 'ACCEPT') {
+        if (booking.status !== BookingStatus.REQUESTED) {
+          throw new Error(`Booking is already ${booking.status.toLowerCase()} and cannot be approved.`)
+        }
+
         const updatedBooking = await tx.booking.update({
           where: { id: bookingId },
           data: {
@@ -63,15 +72,17 @@ export async function POST(req: Request) {
 
         return {
           booking: updatedBooking,
-          message: `Booking approved for ${booking.student.name || 'Student'}. Waiting for boarding.`,
+          message: `Booking accepted for ${booking.student.name || 'Student'}. Waiting for boarding.`,
           availableSeats: booking.vehicle.availableSeats,
+          isCancellation: false,
         }
       } else {
-        // REJECT action: Restore seats to the vehicle
+        // REJECT or CANCEL by driver: Mark status CANCELLED and paymentStatus CANCELLED_BY_DRIVER
         const updatedBooking = await tx.booking.update({
           where: { id: bookingId },
           data: {
-            status: BookingStatus.REJECTED,
+            status: BookingStatus.CANCELLED,
+            paymentStatus: 'CANCELLED_BY_DRIVER',
           },
           include: {
             student: true,
@@ -105,16 +116,17 @@ export async function POST(req: Request) {
 
         return {
           booking: updatedBooking,
-          message: `Booking request rejected. ${booking.seatsBooked} seat(s) restored.`,
+          message: `Ride cancelled by driver. ${booking.seatsBooked} seat(s) restored to shuttle.`,
           availableSeats: newAvailableSeats,
+          isCancellation: true,
         }
       }
     })
 
-    // Instant real-time broadcast to student and driver channels!
+    // Instant real-time broadcast to student, driver, and global GPS monitor channels!
     broadcastRealtimeEvent(`student_${result.booking.studentId}`, 'booking_updated', result.booking)
     broadcastRealtimeEvent(`vehicle_${result.booking.vehicleId}`, 'booking_updated', result.booking)
-    if (normalizedAction === 'REJECT') {
+    if (result.isCancellation) {
       broadcastRealtimeEvent('shuttles_gps', 'seats_updated', {
         vehicleId: result.booking.vehicleId,
         availableSeats: result.availableSeats,

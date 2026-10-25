@@ -25,7 +25,9 @@ import {
   X,
   Phone,
   Loader2,
+  ArrowUpDown,
 } from 'lucide-react'
+import { calculateRoadDistance, formatDistanceAndEta, RouteInfo } from '@/lib/routing'
 
 const PaymentModal = dynamic(() => import('@/components/PaymentModal'), { ssr: false })
 const RefillSeatsModal = dynamic(() => import('@/components/RefillSeatsModal'), { ssr: false })
@@ -57,8 +59,16 @@ interface BookingData {
     email: string
     phone: string
   }
-  pickup: { name: string }
-  drop: { name: string }
+  pickup: {
+    name: string
+    latitude?: number
+    longitude?: number
+  }
+  drop: {
+    name: string
+    latitude?: number
+    longitude?: number
+  }
 }
 
 const KARE_SIMULATED_WAYPOINTS = [
@@ -95,11 +105,17 @@ export default function DriverDashboardPage() {
   const [showRefillModal, setShowRefillModal] = useState(false)
   const [finishedRideStudentName, setFinishedRideStudentName] = useState<string | undefined>(undefined)
   const [respondingBookingId, setRespondingBookingId] = useState<string | null>(null)
+  const [boardingBookingId, setBoardingBookingId] = useState<string | null>(null)
+
+  type SortOption = 'NEAREST_FIRST' | 'EARLIEST_FIRST' | 'NEAREST_WITH_TIME_TIEBREAKER'
+  const [sortOption, setSortOption] = useState<SortOption>('NEAREST_FIRST')
+  const [routeDistances, setRouteDistances] = useState<Record<string, RouteInfo>>({})
 
   const watchIdRef = useRef<number | null>(null)
   const simIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const heartbeatRef = useRef<NodeJS.Timeout | null>(null)
-  const prevRequestedCountRef = useRef(0)
+  const notifiedBookingIdsRef = useRef<Set<string>>(new Set())
+  const initialBookingsLoadedRef = useRef(false)
   const isOnDutyRef = useRef(isOnDuty)
   const vehicleIdRef = useRef<string | null>(null)
 
@@ -247,6 +263,15 @@ export default function DriverDashboardPage() {
       }
       if (data.bookings) {
         setBookings(data.bookings)
+        if (!initialBookingsLoadedRef.current) {
+          initialBookingsLoadedRef.current = true
+          // Seed existing requested bookings so initial load does not trigger false alerts
+          data.bookings.forEach((b: BookingData) => {
+            if (b.status === 'REQUESTED') {
+              notifiedBookingIdsRef.current.add(b.id)
+            }
+          })
+        }
       }
     } catch (err) {
       console.error('Error fetching driver data:', err)
@@ -279,8 +304,12 @@ export default function DriverDashboardPage() {
               if (prev.some((b) => b.id === newBooking.id)) return prev
               return [newBooking, ...prev]
             })
-            playNotificationAlert()
-            setStatusMsg(`New booking request from ${newBooking.student?.name || 'Student'}!`)
+            // Notify driver exactly once per booking
+            if (!notifiedBookingIdsRef.current.has(newBooking.id)) {
+              notifiedBookingIdsRef.current.add(newBooking.id)
+              playNotificationAlert()
+              setStatusMsg(`New booking request from ${newBooking.student?.name || 'Student'}!`)
+            }
           } else if (msg.event === 'booking_updated' && msg.data) {
             const updated: BookingData = msg.data
             setBookings((prev) =>
@@ -459,15 +488,6 @@ export default function DriverDashboardPage() {
     }
   }, [isOnDuty, isSimulatingGps, broadcastLocation])
 
-  // Play audio chime and trigger alert when new booking requests arrive
-  useEffect(() => {
-    const currentRequested = bookings.filter((b) => b.status === 'REQUESTED').length
-    if (currentRequested > prevRequestedCountRef.current) {
-      playNotificationAlert()
-    }
-    prevRequestedCountRef.current = currentRequested
-  }, [bookings, playNotificationAlert])
-
   // Periodic heartbeat while ON DUTY to keep lastGpsUpdate fresh on server
   useEffect(() => {
     if (heartbeatRef.current) {
@@ -540,17 +560,25 @@ export default function DriverDashboardPage() {
     }
   }
 
-  // Handle Driver Approve / Reject of incoming student booking request (Instant Optimistic Update)
-  const handleRespondBooking = async (bookingId: string, action: 'APPROVE' | 'REJECT') => {
+  // Handle Driver Approve / Reject / Cancel of booking request (Instant Optimistic Update)
+  const handleRespondBooking = async (bookingId: string, action: 'APPROVE' | 'REJECT' | 'CANCEL') => {
     setRespondingBookingId(bookingId)
 
     // OPTIMISTIC UPDATE: update local state in 0ms!
     const targetBooking = bookings.find((b) => b.id === bookingId)
-    const newStatus = action === 'APPROVE' ? 'ACCEPTED' : 'REJECTED'
+    const newStatus = action === 'APPROVE' ? 'ACCEPTED' : 'CANCELLED'
     setBookings((prev) =>
-      prev.map((b) => (b.id === bookingId ? { ...b, status: newStatus } : b))
+      prev.map((b) =>
+        b.id === bookingId
+          ? {
+              ...b,
+              status: newStatus,
+              paymentStatus: action !== 'APPROVE' ? 'CANCELLED_BY_DRIVER' : b.paymentStatus,
+            }
+          : b
+      )
     )
-    if (action === 'REJECT' && targetBooking) {
+    if ((action === 'REJECT' || action === 'CANCEL') && targetBooking) {
       setVehicle((prev) =>
         prev
           ? {
@@ -619,10 +647,123 @@ export default function DriverDashboardPage() {
     }
   }
 
+  // Real-time calculation of road distances to student pickup locations as driver moves
+  useEffect(() => {
+    let isMounted = true
+    const computeDistances = async () => {
+      const isLive = isOnDuty && !locationPromptNeeded
+      const newDistances: Record<string, RouteInfo> = {}
+
+      await Promise.all(
+        bookings.map(async (b) => {
+          if (b.pickup?.latitude && b.pickup?.longitude) {
+            const info = await calculateRoadDistance(
+              currentCoords.lat,
+              currentCoords.lng,
+              b.pickup.latitude,
+              b.pickup.longitude,
+              isLive
+            )
+            newDistances[b.id] = info
+          }
+        })
+      )
+
+      if (isMounted) {
+        setRouteDistances((prev) => ({ ...prev, ...newDistances }))
+      }
+    }
+
+    computeDistances()
+    return () => {
+      isMounted = false
+    }
+  }, [currentCoords.lat, currentCoords.lng, bookings, isOnDuty, locationPromptNeeded])
+
+  // Sorting helper supporting:
+  // 1. Nearest pickup first (default)
+  // 2. Earliest booking first
+  // 3. Nearest pickup with booking time as tie-breaker
+  const sortBookingsList = useCallback(
+    (list: BookingData[]) => {
+      return [...list].sort((a, b) => {
+        const infoA = routeDistances[a.id]
+        const infoB = routeDistances[b.id]
+        const distA = infoA?.distanceMeters ?? 999999
+        const distB = infoB?.distanceMeters ?? 999999
+        const timeA = new Date(a.createdAt).getTime()
+        const timeB = new Date(b.createdAt).getTime()
+
+        if (sortOption === 'EARLIEST_FIRST') {
+          return timeA - timeB
+        }
+
+        if (sortOption === 'NEAREST_FIRST') {
+          if (distA !== distB) {
+            return distA - distB
+          }
+          return timeA - timeB
+        }
+
+        // NEAREST_WITH_TIME_TIEBREAKER:
+        // Prioritize nearest pickup; if distance difference is <= 50m, prioritize earlier booking
+        if (Math.abs(distA - distB) <= 50) {
+          return timeA - timeB
+        }
+        return distA - distB
+      })
+    },
+    [routeDistances, sortOption]
+  )
+
+  // Direct Boarding confirmation by Driver
+  const handleBoardPassenger = async (bookingId: string) => {
+    setBoardingBookingId(bookingId)
+    try {
+      const activeVehicleId = vehicleIdRef.current || vehicle?.id
+      const res = await fetch('/api/bookings/board', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId, vehicleId: activeVehicleId }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to confirm boarding.')
+      }
+      setStatusMsg('Passenger boarded successfully!')
+      setBookings((prev) =>
+        prev.map((b) => (b.id === bookingId ? { ...b, status: 'BOARDED' } : b))
+      )
+    } catch (err: unknown) {
+      setStatusMsg(err instanceof Error ? err.message : 'Boarding verification failed.')
+    } finally {
+      setBoardingBookingId(null)
+    }
+  }
+
+  // Format booking timestamp
+  const formatBookingTime = (dateStr: string) => {
+    try {
+      const date = new Date(dateStr)
+      const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      const diffMins = Math.floor((Date.now() - date.getTime()) / 60000)
+      let rel = 'Just now'
+      if (diffMins >= 1 && diffMins < 60) rel = `${diffMins}m ago`
+      else if (diffMins >= 60) rel = `${Math.floor(diffMins / 60)}h ago`
+      return `${time} (${rel})`
+    } catch {
+      return 'Recent'
+    }
+  }
+
   // Partition bookings into REQUESTED (needs driver action), ACCEPTED/RESERVED (pending boarding), and BOARDED
   const requestedBookings = bookings.filter((b) => b.status === 'REQUESTED')
   const reservedBookings = bookings.filter((b) => b.status === 'ACCEPTED' || b.status === 'RESERVED')
   const boardedBookings = bookings.filter((b) => b.status === 'BOARDED')
+
+  // Sorted views according to driver's chosen sorting option
+  const sortedRequestedBookings = sortBookingsList(requestedBookings)
+  const sortedReservedBookings = sortBookingsList(reservedBookings)
 
   const groupedBoardedByDrop = boardedBookings.reduce((acc, booking) => {
     const dropName = booking.drop.name
@@ -933,6 +1074,52 @@ export default function DriverDashboardPage() {
             {/* Right Column: Passengers & Reservations */}
             <div className="lg:col-span-7 space-y-6">
 
+              {/* Sorting Options Bar */}
+              <div className="p-3.5 sm:p-4 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-2xl flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-white">
+                  <ArrowUpDown className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Sort Student Pickups By:</span>
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    id="sort-nearest-first-btn"
+                    type="button"
+                    onClick={() => setSortOption('NEAREST_FIRST')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                      sortOption === 'NEAREST_FIRST'
+                        ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-950/40'
+                        : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                    }`}
+                  >
+                    📍 Nearest Pickup (Default)
+                  </button>
+                  <button
+                    id="sort-earliest-first-btn"
+                    type="button"
+                    onClick={() => setSortOption('EARLIEST_FIRST')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                      sortOption === 'EARLIEST_FIRST'
+                        ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-950/40'
+                        : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                    }`}
+                  >
+                    ⏱️ Earliest Booking First
+                  </button>
+                  <button
+                    id="sort-nearest-tiebreaker-btn"
+                    type="button"
+                    onClick={() => setSortOption('NEAREST_WITH_TIME_TIEBREAKER')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                      sortOption === 'NEAREST_WITH_TIME_TIEBREAKER'
+                        ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-950/40'
+                        : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                    }`}
+                  >
+                    ⚡ Nearest + Time Tie-Breaker
+                  </button>
+                </div>
+              </div>
+
               {/* INCOMING BOOKING REQUESTS (Approve / Reject) */}
               {requestedBookings.length > 0 && (
                 <div className="p-4 sm:p-5 rounded-3xl bg-amber-500/10 border-2 border-amber-500 shadow-2xl shadow-amber-500/20 space-y-3">
@@ -953,62 +1140,218 @@ export default function DriverDashboardPage() {
                   </div>
 
                   <div className="space-y-3">
-                    {requestedBookings.map((req) => (
-                      <div
-                        key={req.id}
-                        className="p-3.5 sm:p-4 rounded-2xl bg-slate-900 border border-amber-500/40 space-y-3"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <p className="font-bold text-sm text-white">{req.student?.name || 'Student'}</p>
-                            {req.student?.phone && (
-                              <p className="text-[11px] text-slate-400 flex items-center gap-1">
-                                <Phone className="w-3 h-3 text-slate-500" />
-                                {req.student.phone}
-                              </p>
+                    {sortedRequestedBookings.map((req) => {
+                      const distInfo = routeDistances[req.id]
+                      const formatted = distInfo ? formatDistanceAndEta(distInfo) : null
+
+                      return (
+                        <div
+                          key={req.id}
+                          className="p-3.5 sm:p-4 rounded-2xl bg-slate-900 border border-amber-500/40 space-y-3"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <p className="font-bold text-sm text-white">{req.student?.name || 'Student'}</p>
+                                <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-[10px] font-bold text-amber-400 uppercase">
+                                  Pending
+                                </span>
+                              </div>
+                              {req.student?.phone && (
+                                <p className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
+                                  <Phone className="w-3 h-3 text-slate-500" />
+                                  {req.student.phone}
+                                </p>
+                              )}
+                            </div>
+                            <span className="text-xs font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
+                              {req.seatsBooked} Seat(s) • ₹{req.fareAmount}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 text-xs text-slate-300 p-2.5 rounded-xl bg-slate-950 border border-slate-800">
+                            <div>
+                              <span className="text-[10px] text-slate-500 block">Pickup Location</span>
+                              <span className="font-semibold text-blue-400 block truncate">{req.pickup.name}</span>
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-slate-500 block">Drop Location</span>
+                              <span className="font-semibold text-emerald-400 block truncate">{req.drop.name}</span>
+                            </div>
+                          </div>
+
+                          {/* Live Road Distance & Booking Time Info */}
+                          <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400 flex-wrap pt-1 border-t border-slate-800/60">
+                            <div className="flex items-center gap-1.5">
+                              <Clock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                              <span>Booked: <strong className="text-slate-200">{formatBookingTime(req.createdAt)}</strong></span>
+                            </div>
+
+                            {formatted ? (
+                              <div className="flex items-center gap-1 font-mono">
+                                <Navigation className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                                <span className="text-blue-300 font-bold">{formatted.distanceText}</span>
+                                <span className="text-slate-400">({formatted.etaText})</span>
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300">
+                                  {formatted.badgeText}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-slate-500 text-[10px]">Calculating road route...</span>
                             )}
                           </div>
-                          <span className="text-xs font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1 rounded-lg">
-                            {req.seatsBooked} Seat(s) • ₹{req.fareAmount}
-                          </span>
-                        </div>
 
-                        <div className="grid grid-cols-2 gap-2 text-xs text-slate-300 p-2.5 rounded-xl bg-slate-950 border border-slate-800">
-                          <div>
-                            <span className="text-[10px] text-slate-500 block">Pickup Location</span>
-                            <span className="font-semibold text-blue-400 block truncate">{req.pickup.name}</span>
-                          </div>
-                          <div>
-                            <span className="text-[10px] text-slate-500 block">Drop Location</span>
-                            <span className="font-semibold text-emerald-400 block truncate">{req.drop.name}</span>
+                          <div className="grid grid-cols-2 gap-2 pt-1">
+                            <button
+                              id={`approve-btn-${req.id}`}
+                              onClick={() => handleRespondBooking(req.id, 'APPROVE')}
+                              disabled={respondingBookingId === req.id}
+                              className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 font-black text-xs shadow-md transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                            >
+                              <Check className="w-4 h-4" />
+                              <span>{respondingBookingId === req.id ? 'Approving...' : 'Approve'}</span>
+                            </button>
+                            <button
+                              id={`reject-btn-${req.id}`}
+                              onClick={() => handleRespondBooking(req.id, 'REJECT')}
+                              disabled={respondingBookingId === req.id}
+                              className="py-2.5 px-3 rounded-xl bg-red-950/80 hover:bg-red-900 border border-red-500/40 text-red-200 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                            >
+                              <X className="w-4 h-4" />
+                              <span>{respondingBookingId === req.id ? 'Rejecting...' : 'Reject'}</span>
+                            </button>
                           </div>
                         </div>
-
-                        <div className="grid grid-cols-2 gap-2 pt-1">
-                          <button
-                            id={`approve-btn-${req.id}`}
-                            onClick={() => handleRespondBooking(req.id, 'APPROVE')}
-                            disabled={respondingBookingId === req.id}
-                            className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 font-black text-xs shadow-md transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
-                          >
-                            <Check className="w-4 h-4" />
-                            <span>{respondingBookingId === req.id ? 'Approving...' : 'Approve'}</span>
-                          </button>
-                          <button
-                            id={`reject-btn-${req.id}`}
-                            onClick={() => handleRespondBooking(req.id, 'REJECT')}
-                            disabled={respondingBookingId === req.id}
-                            className="py-2.5 px-3 rounded-xl bg-red-950/80 hover:bg-red-900 border border-red-500/40 text-red-200 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
-                          >
-                            <X className="w-4 h-4" />
-                            <span>{respondingBookingId === req.id ? 'Rejecting...' : 'Reject'}</span>
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
               )}
+
+              {/* RESERVED Student Pickups List (Pending Pickup / Awaiting Boarding) */}
+              <div className="p-4 sm:p-6 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-2xl space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Users className="w-4 h-4 text-blue-400 shrink-0" />
+                    Pending Pickup Reservations ({reservedBookings.length})
+                  </h2>
+                  <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">
+                    {sortOption === 'NEAREST_FIRST' ? 'Sorted by Nearest Pickup' : sortOption === 'EARLIEST_FIRST' ? 'Sorted by Earliest Booking' : 'Nearest with Time Tie-Breaker'}
+                  </span>
+                </div>
+
+                {reservedBookings.length === 0 ? (
+                  <div className="p-5 rounded-2xl bg-slate-950/60 border border-slate-800 text-center space-y-1">
+                    <Clock className="w-5 h-5 text-slate-600 mx-auto" />
+                    <p className="text-xs text-slate-400">
+                      No pending pickup reservations.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {sortedReservedBookings.map((booking) => {
+                      const distInfo = routeDistances[booking.id]
+                      const formatted = distInfo ? formatDistanceAndEta(distInfo) : null
+
+                      return (
+                        <div
+                          key={booking.id}
+                          className="p-3.5 sm:p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2.5 min-w-0"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-xs text-white truncate">
+                                  {booking.student?.name || 'Student'}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/30 text-[10px] font-bold text-blue-400 uppercase shrink-0">
+                                  Accepted
+                                </span>
+                              </div>
+                              {booking.student?.phone && (
+                                <p className="text-[11px] text-slate-400 flex items-center gap-1 mt-0.5">
+                                  <Phone className="w-3 h-3 text-slate-500" />
+                                  {booking.student.phone}
+                                </p>
+                              )}
+                            </div>
+
+                            <span className="text-xs font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded-lg shrink-0">
+                              {booking.seatsBooked} Seat(s) • ₹{booking.fareAmount}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 xs:grid-cols-2 gap-2 text-xs text-slate-300">
+                            <div className="min-w-0">
+                              <span className="text-[10px] text-slate-500 block">Pickup Stop</span>
+                              <span className="font-semibold text-blue-400 block truncate">{booking.pickup.name}</span>
+                            </div>
+                            <div className="min-w-0">
+                              <span className="text-[10px] text-slate-500 block">Drop Stop</span>
+                              <span className="font-semibold text-emerald-400 block truncate">{booking.drop.name}</span>
+                            </div>
+                          </div>
+
+                          {/* Live Road Distance & Booking Time Info */}
+                          <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400 flex-wrap pt-1 border-t border-slate-800/80">
+                            <div className="flex items-center gap-1.5">
+                              <Clock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                              <span>Booked: <strong className="text-slate-200">{formatBookingTime(booking.createdAt)}</strong></span>
+                            </div>
+
+                            {formatted ? (
+                              <div className="flex items-center gap-1 font-mono">
+                                <Navigation className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                                <span className="text-blue-300 font-bold">{formatted.distanceText}</span>
+                                <span className="text-slate-400">({formatted.etaText})</span>
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300">
+                                  {formatted.badgeText}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-slate-500 text-[10px]">Calculating road route...</span>
+                            )}
+                          </div>
+
+                          {/* Action Buttons: Board Passenger & Cancel Ride */}
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800/80">
+                            <button
+                              id={`board-passenger-btn-${booking.id}`}
+                              onClick={() => handleBoardPassenger(booking.id)}
+                              disabled={boardingBookingId === booking.id || respondingBookingId === booking.id}
+                              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs transition-all flex items-center gap-1.5 shadow-md shadow-blue-950/40 disabled:opacity-50"
+                              title="Confirm passenger has boarded the shuttle"
+                            >
+                              {boardingBookingId === booking.id ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  <span>Boarding...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Bus className="w-3.5 h-3.5" />
+                                  <span>Board Passenger</span>
+                                </>
+                              )}
+                            </button>
+
+                            <button
+                              id={`cancel-reservation-btn-${booking.id}`}
+                              onClick={() => handleRespondBooking(booking.id, 'CANCEL')}
+                              disabled={respondingBookingId === booking.id || boardingBookingId === booking.id}
+                              className="px-3 py-1.5 rounded-xl bg-red-950/80 hover:bg-red-900 border border-red-500/40 text-red-200 font-bold text-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                              title="Cancel only this student's reservation"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              <span>{respondingBookingId === booking.id ? 'Cancelling...' : 'Cancel Ride'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
 
               {/* BOARDED Passengers Grouped by Drop Location */}
               <div className="p-4 sm:p-6 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-2xl space-y-4">
@@ -1018,7 +1361,7 @@ export default function DriverDashboardPage() {
                     On-Board Passengers ({boardedBookings.length})
                   </h2>
                   <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 shrink-0">
-                    Ready for Drop
+                    Pickup in Progress / Ready for Drop
                   </span>
                 </div>
 
@@ -1053,11 +1396,16 @@ export default function DriverDashboardPage() {
                               className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row gap-2.5 sm:items-center sm:justify-between text-xs min-w-0"
                             >
                               <div className="space-y-0.5 min-w-0">
-                                <p className="font-semibold text-slate-100 truncate">
-                                  {passenger.student?.name || 'Student'}
-                                </p>
+                                <div className="flex items-center gap-2">
+                                  <p className="font-semibold text-slate-100 truncate">
+                                    {passenger.student?.name || 'Student'}
+                                  </p>
+                                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-400 text-[9px] font-bold uppercase">
+                                    On-Board
+                                  </span>
+                                </div>
                                 <p className="text-[10px] text-slate-400 truncate">
-                                  Pickup: {passenger.pickup.name} • {passenger.seatsBooked} Seat(s)
+                                  Pickup: {passenger.pickup.name} • {passenger.seatsBooked} Seat(s) • Booked {formatBookingTime(passenger.createdAt)}
                                 </p>
                                 <p className="text-[10px] font-mono text-amber-400">
                                   Collect Fare: ₹{passenger.fareAmount}
@@ -1074,64 +1422,6 @@ export default function DriverDashboardPage() {
                               </button>
                             </div>
                           ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* RESERVED Student Pickups List */}
-              <div className="p-4 sm:p-6 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-2xl space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Users className="w-4 h-4 text-blue-400 shrink-0" />
-                    Pending Pickup Reservations ({reservedBookings.length})
-                  </h2>
-                  <span className="text-[11px] text-slate-400 font-medium hidden sm:inline">Awaiting Boarding Scan</span>
-                </div>
-
-                {reservedBookings.length === 0 ? (
-                  <div className="p-5 rounded-2xl bg-slate-950/60 border border-slate-800 text-center space-y-1">
-                    <Clock className="w-5 h-5 text-slate-600 mx-auto" />
-                    <p className="text-xs text-slate-400">
-                      No pending pickup reservations.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {reservedBookings.map((booking) => (
-                      <div
-                        key={booking.id}
-                        className="p-3.5 sm:p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2 min-w-0"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold text-xs text-white truncate">
-                            {booking.student?.name || 'Student'}
-                          </span>
-                          <span className="px-2 py-0.5 rounded-full bg-blue-500/10 border border-blue-500/30 text-[10px] font-bold text-blue-400 uppercase shrink-0">
-                            {booking.status}
-                          </span>
-                        </div>
-
-                        <div className="grid grid-cols-1 xs:grid-cols-2 gap-2 text-xs text-slate-300">
-                          <div className="min-w-0">
-                            <span className="text-[10px] text-slate-500 block">Pickup Stop</span>
-                            <span className="font-semibold text-blue-400 block truncate">{booking.pickup.name}</span>
-                          </div>
-                          <div className="min-w-0">
-                            <span className="text-[10px] text-slate-500 block">Drop Stop</span>
-                            <span className="font-semibold text-emerald-400 block truncate">{booking.drop.name}</span>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-[11px] gap-2">
-                          <span className="text-slate-400 truncate">
-                            Seats: <strong className="text-amber-400 font-mono">{booking.seatsBooked}</strong> • Fare: <strong className="text-amber-400 font-mono">₹{booking.fareAmount}</strong>
-                          </span>
-                          <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 shrink-0">
-                            Cash / Driver UPI
-                          </span>
                         </div>
                       </div>
                     ))}

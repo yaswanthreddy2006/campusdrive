@@ -22,6 +22,7 @@ import {
   LogOut,
   ShieldAlert,
   Lock,
+  Users,
 } from 'lucide-react'
 
 interface AdminMetrics {
@@ -30,6 +31,13 @@ interface AdminMetrics {
   totalActiveAutosOnDuty: number
   seatUtilizationPercent: number
   pendingDriversCount?: number
+  totalActiveBookings?: number
+  totalActivePassengers?: number
+  totalBoardedPassengers?: number
+  totalFleetCapacity?: number
+  totalActiveCapacity?: number
+  totalAvailableSeats?: number
+  totalApprovedDrivers?: number
 }
 
 interface PendingDriver {
@@ -41,6 +49,23 @@ interface PendingDriver {
   driverStatus: string
   vehicle?: {
     vehicleNumber: string
+  }
+}
+
+interface DriverProfile {
+  id: string
+  name: string
+  email: string
+  phone: string
+  createdAt: string
+  driverStatus: string
+  vehicle?: {
+    id: string
+    vehicleNumber: string
+    isOnline: boolean
+    capacity: number
+    availableSeats: number
+    lastGpsUpdate: string | null
   }
 }
 
@@ -89,6 +114,7 @@ export default function AdminDashboardPage() {
 
   const [fleet, setFleet] = useState<FleetVehicle[]>([])
   const [pendingDrivers, setPendingDrivers] = useState<PendingDriver[]>([])
+  const [allDrivers, setAllDrivers] = useState<DriverProfile[]>([])
   const [rideLogs, setRideLogs] = useState<RideLog[]>([])
   const [refreshing, setRefreshing] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -112,6 +138,9 @@ export default function AdminDashboardPage() {
       }
       if (data.pendingDrivers) {
         setPendingDrivers(data.pendingDrivers)
+      }
+      if (data.allDrivers) {
+        setAllDrivers(data.allDrivers)
       }
       if (data.rideLogs) {
         setRideLogs(data.rideLogs)
@@ -335,76 +364,104 @@ export default function AdminDashboardPage() {
           </h1>
         </div>
 
-        {/* 4 Key Metrics Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Operations & Capacity Analytics Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           
-          {/* Metric 1: Total Completed Rides */}
-          <div className="p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
+          {/* Card 1: Total Active Bookings */}
+          <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>Total Completed Rides</span>
+              <span>Active Bookings</span>
+              <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
+                <FileText className="w-4 h-4" />
+              </div>
+            </div>
+            <div className="text-2xl sm:text-3xl font-black text-white font-mono">
+              {metrics.totalActiveBookings ?? 0}
+            </div>
+            <p className="text-[11px] text-blue-400 font-medium truncate">
+              {metrics.totalActivePassengers ?? 0} Seat(s) Requested/Reserved
+            </p>
+          </div>
+
+          {/* Card 2: Passenger Count */}
+          <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
+            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+              <span>Passenger Count</span>
+              <div className="w-8 h-8 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                <Users className="w-4 h-4" />
+              </div>
+            </div>
+            <div className="text-2xl sm:text-3xl font-black text-indigo-400 font-mono">
+              {metrics.totalActivePassengers ?? 0}
+            </div>
+            <p className="text-[11px] text-indigo-300 font-medium truncate">
+              {metrics.totalBoardedPassengers ?? 0} On-Board Shuttles
+            </p>
+          </div>
+
+          {/* Card 3: Shuttle Capacity */}
+          <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
+            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+              <span>Shuttle Capacity</span>
               <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                <Activity className="w-4 h-4" />
+              </div>
+            </div>
+            <div className="text-2xl sm:text-3xl font-black text-emerald-400 font-mono truncate">
+              {metrics.totalAvailableSeats ?? 0} <span className="text-xs text-slate-500 font-normal">/ {metrics.totalActiveCapacity || metrics.totalFleetCapacity || 0} Open</span>
+            </div>
+            <p className="text-[11px] text-emerald-300 font-medium truncate">
+              {metrics.seatUtilizationPercent}% Active Fleet Utilization
+            </p>
+          </div>
+
+          {/* Card 4: Driver Availability */}
+          <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
+            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+              <span>Driver Availability</span>
+              <div className="w-8 h-8 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
+                <Bus className="w-4 h-4" />
+              </div>
+            </div>
+            <div className="text-2xl sm:text-3xl font-black text-white font-mono truncate">
+              {metrics.totalActiveAutosOnDuty} <span className="text-xs text-slate-500 font-normal">/ {metrics.totalApprovedDrivers || metrics.totalActiveAutosOnDuty}</span>
+            </div>
+            <p className="text-[11px] text-cyan-400 font-medium flex items-center gap-1 truncate">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+              Drivers On Duty Now
+            </p>
+          </div>
+
+          {/* Card 5: Total Completed Rides */}
+          <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
+            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+              <span>Completed Rides</span>
+              <div className="w-8 h-8 rounded-xl bg-teal-500/10 border border-teal-500/30 flex items-center justify-center text-teal-400">
                 <CheckCircle2 className="w-4 h-4" />
               </div>
             </div>
-            <div className="text-3xl font-black text-white font-mono">
+            <div className="text-2xl sm:text-3xl font-black text-white font-mono">
               {metrics.totalCompletedRides}
             </div>
-            <p className="text-[11px] text-emerald-400 font-medium">
+            <p className="text-[11px] text-teal-300 font-medium truncate">
               Successful Student Drops
             </p>
           </div>
 
-          {/* Metric 2: Daily Total Revenue */}
-          <div className="p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
+          {/* Card 6: Daily Total Revenue */}
+          <div className="p-4 sm:p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span>Daily Total Revenue</span>
               <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
                 <CreditCard className="w-4 h-4" />
               </div>
             </div>
-            <div className="text-3xl font-black text-amber-400 font-mono">
+            <div className="text-2xl sm:text-3xl font-black text-amber-400 font-mono">
               ₹{metrics.dailyTotalRevenue}
             </div>
-            <p className="text-[11px] text-amber-300 font-medium">
-              Collected via Cash & Driver UPI
+            <p className="text-[11px] text-amber-300 font-medium truncate">
+              Cash & Driver UPI
             </p>
-          </div>
-
-          {/* Metric 3: Total Active Autos on Duty */}
-          <div className="p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>Shuttles On Duty</span>
-              <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
-                <Bus className="w-4 h-4" />
-              </div>
-            </div>
-            <div className="text-3xl font-black text-white font-mono">
-              {metrics.totalActiveAutosOnDuty}
-            </div>
-            <p className="text-[11px] text-blue-400 font-medium flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-              Broadcasting Live GPS
-            </p>
-          </div>
-
-          {/* Metric 4: Seat Utilization % */}
-          <div className="p-5 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-xl space-y-2">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>Seat Capacity Utilization</span>
-              <div className="w-8 h-8 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-                <Activity className="w-4 h-4" />
-              </div>
-            </div>
-            <div className="text-3xl font-black text-indigo-400 font-mono">
-              {metrics.seatUtilizationPercent}%
-            </div>
-            {/* Progress Bar */}
-            <div className="w-full h-1.5 rounded-full bg-slate-950 overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-indigo-500 to-blue-500 rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, metrics.seatUtilizationPercent)}%` }}
-              />
-            </div>
           </div>
 
         </div>
@@ -492,6 +549,98 @@ export default function AdminDashboardPage() {
                             Reject
                           </button>
                         </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Registered Drivers Directory & Real-Time Duty Status Table */}
+        <div className="p-4 sm:p-6 rounded-3xl bg-slate-900/90 border border-slate-800 shadow-2xl space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <h2 className="text-base font-bold text-white flex items-center gap-2">
+              <UserCheck className="w-4 h-4 text-emerald-400" />
+              Registered Drivers Directory & Duty Status
+            </h2>
+            <span className="text-xs font-semibold text-slate-400">
+              {allDrivers.length} Driver(s) in Fleet
+            </span>
+          </div>
+
+          <div className="overflow-x-auto custom-scrollbar">
+            <table className="w-full text-left text-xs min-w-[700px]">
+              <thead className="bg-slate-950/80 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                <tr>
+                  <th className="py-3 px-4 whitespace-nowrap">Driver Name</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Mobile Number</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Assigned Vehicle</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Duty Status</th>
+                  <th className="py-3 px-4 whitespace-nowrap">Approval Status</th>
+                  <th className="py-3 px-4 text-right whitespace-nowrap">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {allDrivers.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-6 text-center text-slate-500">
+                      No drivers registered in the system yet.
+                    </td>
+                  </tr>
+                ) : (
+                  allDrivers.map((d) => (
+                    <tr key={d.id} className="hover:bg-slate-850/50 transition-colors">
+                      <td className="py-3.5 px-4 font-bold text-white whitespace-nowrap">
+                        {d.name || 'Unnamed Driver'}
+                        <div className="text-[10px] text-slate-400 font-mono font-normal">{d.email}</div>
+                      </td>
+                      <td className="py-3.5 px-4 font-mono text-slate-200 whitespace-nowrap">
+                        +91 {d.phone || 'N/A'}
+                      </td>
+                      <td className="py-3.5 px-4 font-mono font-bold text-amber-400 whitespace-nowrap">
+                        {d.vehicle?.vehicleNumber || 'Unassigned'}
+                      </td>
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {d.vehicle?.isOnline ? (
+                          <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-bold text-emerald-400 inline-flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                            ON DUTY
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700 text-[10px] font-semibold text-slate-400">
+                            OFF DUTY
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {d.driverStatus === 'APPROVED' ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-bold text-emerald-400">
+                            APPROVED
+                          </span>
+                        ) : d.driverStatus === 'PENDING' ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-[10px] font-bold text-amber-400">
+                            PENDING APPROVAL
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/30 text-[10px] font-semibold text-rose-400">
+                            REJECTED
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                        {d.driverStatus === 'PENDING' ? (
+                          <button
+                            onClick={() => handleVerifyDriver(d.id, 'APPROVE')}
+                            disabled={verifyingId === d.id}
+                            className="px-3 py-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-all"
+                          >
+                            Approve
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-slate-500 font-mono">Ready</span>
+                        )}
                       </td>
                     </tr>
                   ))
