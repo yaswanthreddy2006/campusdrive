@@ -72,8 +72,12 @@ export function middleware(req: NextRequest) {
 
   // 3. Guard /api/driver/* routes
   if (pathname.startsWith('/api/driver')) {
-    // Allow driver login endpoint publicly
-    if (pathname === '/api/driver/login') {
+    // Allow driver login, registration, and status check endpoints publicly
+    if (
+      pathname === '/api/driver/login' ||
+      pathname === '/api/driver/register' ||
+      pathname === '/api/driver/status'
+    ) {
       return NextResponse.next()
     }
 

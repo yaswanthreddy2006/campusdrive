@@ -60,26 +60,69 @@ export async function GET() {
       },
     })
 
-    // 4. Overall Campus Seat Capacity Utilization %
-    const activeVehicles = await prisma.vehicle.findMany({
-      where: {
-        isOnline: true,
-        lastGpsUpdate: { gte: staleCutoff },
-      },
+    // 4. Overall Campus Seat Capacity & Utilization
+    const allVehicles = await prisma.vehicle.findMany({
+      include: { driver: true },
     })
+    const totalFleetCapacity = allVehicles.reduce((sum, v) => sum + v.capacity, 0)
 
-    let totalCapacity = 0
+    const activeVehicles = allVehicles.filter(
+      (v) => v.isOnline && v.lastGpsUpdate && v.lastGpsUpdate >= staleCutoff
+    )
+
+    let totalActiveCapacity = 0
+    let totalAvailableSeats = 0
     let totalOccupiedSeats = 0
 
     activeVehicles.forEach((v) => {
-      totalCapacity += v.capacity
+      totalActiveCapacity += v.capacity
+      totalAvailableSeats += v.availableSeats
       totalOccupiedSeats += Math.max(0, v.capacity - v.availableSeats)
     })
 
     const seatUtilizationPercent =
-      totalCapacity > 0 ? Math.round((totalOccupiedSeats / totalCapacity) * 100) : 0
+      totalActiveCapacity > 0 ? Math.round((totalOccupiedSeats / totalActiveCapacity) * 100) : 0
 
-    // 5. Live Fleet Status
+    // 5. Total Active Bookings & Passenger Counts
+    const activeBookingsCount = await prisma.booking.count({
+      where: {
+        status: {
+          in: ['REQUESTED', 'ACCEPTED', 'RESERVED', 'BOARDED'],
+        },
+      },
+    })
+
+    const activePassengersResult = await prisma.booking.aggregate({
+      where: {
+        status: {
+          in: ['REQUESTED', 'ACCEPTED', 'RESERVED', 'BOARDED'],
+        },
+      },
+      _sum: {
+        seatsBooked: true,
+      },
+    })
+    const totalActivePassengers = activePassengersResult._sum.seatsBooked || 0
+
+    const boardedPassengersResult = await prisma.booking.aggregate({
+      where: {
+        status: 'BOARDED',
+      },
+      _sum: {
+        seatsBooked: true,
+      },
+    })
+    const totalBoardedPassengers = boardedPassengersResult._sum.seatsBooked || 0
+
+    // 6. Driver Availability Metrics
+    const totalApprovedDrivers = await prisma.user.count({
+      where: {
+        role: 'DRIVER',
+        driverStatus: 'APPROVED',
+      },
+    })
+
+    // 7. Live Fleet Status
     const liveFleet = await prisma.vehicle.findMany({
       orderBy: { isOnline: 'desc' },
       include: {
@@ -127,6 +170,17 @@ export async function GET() {
       },
     })
 
+    // 8. All Registered Drivers Directory (Name, Phone, Duty Status, Vehicle, Approval Status)
+    const allDrivers = await prisma.user.findMany({
+      where: {
+        role: 'DRIVER',
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        vehicle: true,
+      },
+    })
+
     return NextResponse.json({
       success: true,
       metrics: {
@@ -135,9 +189,17 @@ export async function GET() {
         totalActiveAutosOnDuty,
         seatUtilizationPercent,
         pendingDriversCount: pendingDrivers.length,
+        totalActiveBookings: activeBookingsCount,
+        totalActivePassengers,
+        totalBoardedPassengers,
+        totalFleetCapacity,
+        totalActiveCapacity,
+        totalAvailableSeats,
+        totalApprovedDrivers,
       },
       liveFleet,
       pendingDrivers,
+      allDrivers,
       rideLogs,
     })
   } catch (error: unknown) {

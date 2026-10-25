@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic'
 
 export async function POST(req: Request) {
   try {
-    const { bookingId } = await req.json()
+    const { bookingId, cancelledBy } = await req.json()
 
     if (!bookingId) {
       return NextResponse.json(
@@ -14,6 +14,8 @@ export async function POST(req: Request) {
         { status: 400 }
       )
     }
+
+    const isCancelledByDriver = cancelledBy === 'DRIVER'
 
     const result = await prisma.$transaction(async (tx) => {
       const booking = await tx.booking.findUnique({
@@ -33,6 +35,7 @@ export async function POST(req: Request) {
         where: { id: bookingId },
         data: {
           status: BookingStatus.CANCELLED,
+          paymentStatus: isCancelledByDriver ? 'CANCELLED_BY_DRIVER' : 'CANCELLED_BY_STUDENT',
         },
         include: {
           pickup: true,
@@ -46,6 +49,7 @@ export async function POST(req: Request) {
         },
       })
 
+      let remainingSeats = booking.vehicle?.availableSeats ?? 9
       // If booking was not rejected or completed, restore seats
       if (booking.status !== BookingStatus.REJECTED) {
         const vehicle = await tx.vehicle.findUnique({
@@ -53,31 +57,38 @@ export async function POST(req: Request) {
         })
 
         if (vehicle) {
-          const newAvailableSeats = Math.min(
+          remainingSeats = Math.min(
             vehicle.capacity,
             vehicle.availableSeats + booking.seatsBooked
           )
           await tx.vehicle.update({
             where: { id: vehicle.id },
             data: {
-              availableSeats: newAvailableSeats,
+              availableSeats: remainingSeats,
             },
           })
         }
       }
 
-      return updatedBooking
+      return { booking: updatedBooking, remainingSeats }
     })
 
-    // Instant real-time broadcast to student and driver!
+    // Instant real-time broadcast to student, driver, and global GPS monitor!
     const { broadcastRealtimeEvent } = await import('@/lib/realtime')
-    broadcastRealtimeEvent(`student_${result.studentId}`, 'booking_updated', result)
-    broadcastRealtimeEvent(`vehicle_${result.vehicleId}`, 'booking_updated', result)
+    broadcastRealtimeEvent(`student_${result.booking.studentId}`, 'booking_updated', result.booking)
+    broadcastRealtimeEvent(`vehicle_${result.booking.vehicleId}`, 'booking_updated', result.booking)
+    broadcastRealtimeEvent('shuttles_gps', 'seats_updated', {
+      vehicleId: result.booking.vehicleId,
+      availableSeats: result.remainingSeats,
+    })
 
     return NextResponse.json({
       success: true,
-      message: 'Booking cancelled successfully.',
-      booking: result,
+      message: isCancelledByDriver
+        ? 'Ride cancelled by driver successfully.'
+        : 'Booking cancelled successfully.',
+      booking: result.booking,
+      availableSeats: result.remainingSeats,
     })
   } catch (error: unknown) {
     console.error('Error cancelling booking:', error)

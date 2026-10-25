@@ -91,6 +91,8 @@ export default function StudentDashboardPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
+  const [driverCancelledMsg, setDriverCancelledMsg] = useState<string | null>(null)
+  const [studentIdState, setStudentIdState] = useState<string | null>(null)
 
   const [activeBooking, setActiveBooking] = useState<BookingItem | null>(null)
   const [pastBookings, setPastBookings] = useState<BookingItem[]>([])
@@ -207,7 +209,7 @@ export default function StudentDashboardPage() {
   // Real-Time SSE Listener for Instant Driver Approvals, Rejections, Boarding, and GPS
   useEffect(() => {
     if (typeof window === 'undefined') return
-    const studentId = (session?.user as { id?: string })?.id
+    const studentId = (session?.user as { id?: string })?.id || studentIdState
     const studentChannel = studentId ? `student_${studentId}` : '*'
     const channels = `${studentChannel},shuttles_gps`
 
@@ -220,15 +222,43 @@ export default function StudentDashboardPage() {
           const msg = JSON.parse(event.data)
           if (msg.event === 'booking_updated' || msg.event === 'booking_created') {
             if (msg.data) {
-              setActiveBooking(msg.data)
+              const bData = msg.data
+              if (
+                bData.status === 'CANCELLED' ||
+                bData.status === 'REJECTED'
+              ) {
+                if (bData.paymentStatus === 'CANCELLED_BY_DRIVER' || bData.status === 'REJECTED') {
+                  setDriverCancelledMsg('Your driver has cancelled the ride. Please book another available driver or shuttle.')
+                }
+              } else {
+                setDriverCancelledMsg(null)
+              }
+              setActiveBooking(bData)
             }
             fetchStudentBookings()
           } else if (msg.event === 'duty_status_changed') {
-            if (msg.data && msg.data.isOnline === false && msg.data.vehicleId) {
-              setActiveShuttles((prev) => prev.filter((s) => s.id !== msg.data.vehicleId))
+            if (msg.data) {
+              if (msg.data.isOnline === false && msg.data.vehicleId) {
+                setActiveShuttles((prev) => prev.filter((s) => s.id !== msg.data.vehicleId))
+              } else if (msg.data.isOnline === true && msg.data.vehicle) {
+                setActiveShuttles((prev) => {
+                  const exists = prev.some((s) => s.id === msg.data.vehicle.id)
+                  if (!exists) return [msg.data.vehicle, ...prev]
+                  return prev.map((s) => (s.id === msg.data.vehicle.id ? msg.data.vehicle : s))
+                })
+              }
             }
             fetchActiveShuttles()
           } else if (msg.event === 'seats_updated') {
+            if (msg.data?.vehicleId && typeof msg.data.availableSeats === 'number') {
+              setActiveShuttles((prev) =>
+                prev.map((s) =>
+                  s.id === msg.data.vehicleId
+                    ? { ...s, availableSeats: msg.data.availableSeats }
+                    : s
+                )
+              )
+            }
             fetchActiveShuttles()
           } else if (msg.event === 'shuttle_moved' && msg.data) {
             const moved = msg.data
@@ -265,7 +295,7 @@ export default function StudentDashboardPage() {
     return () => {
       if (es) es.close()
     }
-  }, [session?.user])
+  }, [session?.user, studentIdState])
 
   // Fetch active shuttles for map
   async function fetchActiveShuttles() {
@@ -293,17 +323,35 @@ export default function StudentDashboardPage() {
     try {
       const res = await fetch('/api/bookings/student')
       const data = await res.json()
+      if (data.studentId && !studentIdState) {
+        setStudentIdState(data.studentId)
+      }
       if (data.bookings && data.bookings.length > 0) {
         const active = data.bookings.find(
           (b: BookingItem) =>
             b.status === 'REQUESTED' ||
             b.status === 'ACCEPTED' ||
             b.status === 'RESERVED' ||
-            b.status === 'BOARDED' ||
-            b.status === 'REJECTED'
+            b.status === 'BOARDED'
         )
-        setActiveBooking(active || null)
-        setPastBookings(data.bookings.filter((b: BookingItem) => b.id !== active?.id))
+        if (active) {
+          setActiveBooking(active)
+          setPastBookings(data.bookings.filter((b: BookingItem) => b.id !== active.id))
+        } else {
+          // If no active booking, check if latest booking was driver cancelled
+          const latest = data.bookings[0]
+          if (
+            latest &&
+            (latest.status === 'REJECTED' || latest.paymentStatus === 'CANCELLED_BY_DRIVER')
+          ) {
+            setActiveBooking(latest)
+            setDriverCancelledMsg('Your driver has cancelled the ride. Please book another available driver or shuttle.')
+            setPastBookings(data.bookings.slice(1))
+          } else {
+            setActiveBooking(null)
+            setPastBookings(data.bookings)
+          }
+        }
       } else {
         setActiveBooking(null)
       }
@@ -319,13 +367,14 @@ export default function StudentDashboardPage() {
       const res = await fetch('/api/bookings/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bookingId }),
+        body: JSON.stringify({ bookingId, cancelledBy: 'STUDENT' }),
       })
       const data = await res.json()
       if (!res.ok) {
         throw new Error(data.error || 'Failed to cancel booking.')
       }
       setActiveBooking(null)
+      setDriverCancelledMsg(null)
       setSuccessMsg('Booking request cancelled successfully.')
       fetchStudentBookings()
     } catch (err: unknown) {
@@ -335,6 +384,15 @@ export default function StudentDashboardPage() {
     }
   }
 
+  const hasActiveBooking = Boolean(
+    activeBooking && (
+      activeBooking.status === 'REQUESTED' ||
+      activeBooking.status === 'ACCEPTED' ||
+      activeBooking.status === 'RESERVED' ||
+      activeBooking.status === 'BOARDED'
+    )
+  )
+
   const isSameLocation = pickupId !== '' && pickupId === dropId
   const totalFare = seatsBooked * 10
 
@@ -342,6 +400,16 @@ export default function StudentDashboardPage() {
     e.preventDefault()
     setError(null)
     setSuccessMsg(null)
+
+    if (hasActiveBooking) {
+      setError('You already have an active shuttle booking. Please complete or cancel your current ride before booking again.')
+      return
+    }
+
+    if (activeShuttles.length === 0) {
+      setError('Sorry, no drivers are on duty right now. Please try again later.')
+      return
+    }
 
     if (isSameLocation) {
       setError('Pickup and Drop-off locations cannot be the same stop.')
@@ -369,7 +437,8 @@ export default function StudentDashboardPage() {
         throw new Error(data.error || 'Seat reservation failed.')
       }
 
-      setSuccessMsg('Ride requested! Waiting for driver approval...')
+      setSuccessMsg('Booking request sent. Please wait for the driver to respond')
+      setDriverCancelledMsg(null)
       setActiveBooking(data.booking)
       fetchStudentBookings()
     } catch (err: unknown) {
@@ -530,6 +599,28 @@ export default function StudentDashboardPage() {
           </div>
         )}
 
+        {/* Driver Cancelled Standalone Alert */}
+        {driverCancelledMsg && (!activeBooking || activeBooking.status === 'CANCELLED' || activeBooking.status === 'REJECTED') && (
+          <div className="p-4 rounded-3xl bg-red-950/90 border border-red-500/50 text-red-200 text-xs shadow-2xl flex items-center justify-between animate-fadeIn">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-red-500/20 border border-red-500/40 flex items-center justify-center text-red-400 shrink-0">
+                <AlertTriangle className="w-5 h-5 text-red-400 animate-pulse" />
+              </div>
+              <div>
+                <h4 className="font-bold text-sm text-white">Your driver has cancelled the ride. Please book another available driver or shuttle.</h4>
+                <p className="text-[11px] text-red-300">The cancelled booking has been released. You may choose any online shuttle and book again.</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setDriverCancelledMsg(null)}
+              className="p-1 rounded-lg bg-red-900/60 hover:bg-red-800 text-red-200 shrink-0"
+              title="Dismiss"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Turn on Location Access Banner */}
         {locationPermissionPrompt && !studentLocation && (
           <div className="p-4 rounded-3xl bg-blue-950/80 border border-blue-500/40 text-xs shadow-2xl backdrop-blur-md flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 animate-fadeIn">
@@ -581,7 +672,7 @@ export default function StudentDashboardPage() {
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <h3 className="font-extrabold text-sm sm:text-base text-white truncate">
-                          No shuttles currently on campus duty
+                          Sorry, no drivers are on duty right now. Please try again later.
                         </h3>
                         <span className="text-[9px] px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-slate-400 font-bold flex items-center gap-1 shrink-0 uppercase">
                           <span className="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
@@ -589,7 +680,7 @@ export default function StudentDashboardPage() {
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-400 truncate">
-                        All campus shuttle drivers are currently off duty.
+                        All campus shuttle drivers are currently off duty. Please try again later.
                       </p>
                     </div>
                   </div>
@@ -743,15 +834,23 @@ export default function StudentDashboardPage() {
                     className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider shrink-0 border ${
                       activeBooking.status === 'REQUESTED'
                         ? 'bg-amber-500/10 border-amber-500/40 text-amber-400 animate-pulse'
-                        : activeBooking.status === 'REJECTED'
+                        : activeBooking.status === 'REJECTED' || (activeBooking.status === 'CANCELLED' && activeBooking.paymentStatus === 'CANCELLED_BY_DRIVER')
                         ? 'bg-red-500/10 border-red-500/40 text-red-400'
+                        : activeBooking.status === 'CANCELLED'
+                        ? 'bg-slate-500/10 border-slate-500/40 text-slate-400'
                         : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
                     }`}
                   >
                     {activeBooking.status === 'REQUESTED'
-                      ? 'Waiting Approval'
-                      : activeBooking.status === 'ACCEPTED'
-                      ? 'Driver Approved'
+                      ? 'Pending'
+                      : activeBooking.status === 'ACCEPTED' || activeBooking.status === 'RESERVED'
+                      ? 'Accepted'
+                      : activeBooking.status === 'REJECTED' || (activeBooking.status === 'CANCELLED' && activeBooking.paymentStatus === 'CANCELLED_BY_DRIVER')
+                      ? 'Driver Cancelled'
+                      : activeBooking.status === 'COMPLETED'
+                      ? 'Completed'
+                      : activeBooking.status === 'BOARDED'
+                      ? 'Boarded'
                       : activeBooking.status}
                   </span>
                 </div>
@@ -764,27 +863,31 @@ export default function StudentDashboardPage() {
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
                         <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
                       </span>
-                      Notification Sent to Driver
+                      Booking request sent. Please wait for the driver to respond
                     </p>
                     <p className="text-[11px] text-amber-200/90 leading-relaxed">
-                      Your booking request has been sent to the shuttle driver for approval. Please wait a moment while the driver confirms.
+                      Your booking request has been sent to the shuttle driver for approval. Please wait for the driver to confirm.
                     </p>
                   </div>
                 )}
 
-                {activeBooking.status === 'REJECTED' && (
-                  <div className="p-3.5 rounded-2xl bg-red-500/10 border border-red-500/30 space-y-2 text-xs text-red-300">
-                    <p className="font-bold text-red-400">
-                      Booking Request Declined by Driver
+                {(activeBooking.status === 'REJECTED' || (activeBooking.status === 'CANCELLED' && activeBooking.paymentStatus === 'CANCELLED_BY_DRIVER')) && (
+                  <div className="p-3.5 rounded-2xl bg-red-500/10 border border-red-500/30 space-y-2 text-xs text-red-300 animate-fadeIn">
+                    <p className="font-bold text-red-400 flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                      Your driver has cancelled the ride. Please book another available driver or shuttle.
                     </p>
                     <p className="text-[11px] text-red-200/90 leading-relaxed">
-                      The shuttle driver was unable to accept your request at this time. Any held seats have been released.
+                      The held seats have been automatically released. You can select another available driver or shuttle on the right and book a ride now.
                     </p>
                     <button
-                      onClick={() => setActiveBooking(null)}
+                      onClick={() => {
+                        setActiveBooking(null)
+                        setDriverCancelledMsg(null)
+                      }}
                       className="py-1.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-red-500/40 text-white font-semibold text-xs transition-colors"
                     >
-                      Book Another Ride
+                      Book Another Available Shuttle
                     </button>
                   </div>
                 )}
@@ -792,11 +895,31 @@ export default function StudentDashboardPage() {
                 {(activeBooking.status === 'ACCEPTED' || activeBooking.status === 'RESERVED') && (
                   <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
                     <p className="font-bold text-emerald-400">
-                      Ride Approved by Driver!
+                      Ride Accepted by Driver!
                     </p>
                     <p className="text-[11px] text-emerald-200/90 leading-relaxed">
-                      Your seat is confirmed. Show your boarding QR code or scan the vehicle QR code when the shuttle arrives.
+                      Your seat is confirmed. Show your boarding pass QR code or scan the vehicle QR code when the shuttle arrives.
                     </p>
+                  </div>
+                )}
+
+                {activeBooking.status === 'COMPLETED' && (
+                  <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+                    <p className="font-bold text-emerald-400">
+                      Ride Completed!
+                    </p>
+                    <p className="text-[11px] text-emerald-200/90 leading-relaxed">
+                      You have arrived at your destination stop. Have a wonderful day on campus!
+                    </p>
+                    <button
+                      onClick={() => {
+                        setActiveBooking(null)
+                        setDriverCancelledMsg(null)
+                      }}
+                      className="mt-1.5 py-1 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-emerald-500/40 text-white font-semibold text-xs transition-colors"
+                    >
+                      Book New Shuttle
+                    </button>
                   </div>
                 )}
 
@@ -871,7 +994,10 @@ export default function StudentDashboardPage() {
                 )}
 
                 {/* Cancel Booking / Request Button */}
-                {activeBooking.status !== 'BOARDED' && activeBooking.status !== 'REJECTED' && (
+                {activeBooking.status !== 'BOARDED' &&
+                  activeBooking.status !== 'REJECTED' &&
+                  activeBooking.status !== 'CANCELLED' &&
+                  activeBooking.status !== 'COMPLETED' && (
                   <button
                     onClick={() => handleCancelBooking(activeBooking.id)}
                     disabled={cancelling}
@@ -946,11 +1072,15 @@ export default function StudentDashboardPage() {
                         id="shuttle-select"
                         value={selectedDriverVehicleId || activeShuttles[0]?.id}
                         onChange={(e) => setSelectedDriverVehicleId(e.target.value)}
-                        className="w-full pl-10 pr-8 py-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 text-xs sm:text-sm text-slate-100 outline-none appearance-none transition-all cursor-pointer font-medium"
+                        className={`w-full pl-10 pr-8 py-3 rounded-2xl bg-slate-950 border ${
+                          selectedShuttle && selectedShuttle.availableSeats < seatsBooked
+                            ? 'border-amber-500 focus:border-amber-400'
+                            : 'border-slate-800 focus:border-amber-500'
+                        } focus:ring-1 focus:ring-amber-500 text-xs sm:text-sm text-slate-100 outline-none appearance-none transition-all cursor-pointer font-medium`}
                       >
                         {activeShuttles.map((shuttle) => (
                           <option key={shuttle.id} value={shuttle.id}>
-                            {shuttle.vehicleNumber} ({shuttle.driver?.name || 'Driver'}) • {shuttle.availableSeats} seat(s) open
+                            {shuttle.vehicleNumber} ({shuttle.driver?.name || 'Driver'}) • {shuttle.availableSeats <= 0 ? 'FULL (0 seats)' : `${shuttle.availableSeats} seat(s) open`}
                           </option>
                         ))}
                       </select>
@@ -958,6 +1088,38 @@ export default function StudentDashboardPage() {
                         <ChevronDown className="w-4 h-4" />
                       </div>
                     </div>
+
+                    {/* Shuttle Full Notice & Fast Switch Option */}
+                    {selectedShuttle && selectedShuttle.availableSeats < seatsBooked && (
+                      <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs space-y-2 animate-fadeIn mt-2">
+                        <div className="flex items-center gap-1.5 font-bold text-white">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span>This shuttle has reached capacity. Please select another available shuttle.</span>
+                        </div>
+                        {activeShuttles.some((s) => s.id !== selectedShuttle.id && s.availableSeats >= seatsBooked) ? (
+                          <div className="pt-1 flex items-center gap-2 flex-wrap">
+                            <span className="text-[11px] text-slate-300">Other available shuttles:</span>
+                            {activeShuttles
+                              .filter((s) => s.id !== selectedShuttle.id && s.availableSeats >= seatsBooked)
+                              .map((other) => (
+                                <button
+                                  key={other.id}
+                                  type="button"
+                                  onClick={() => setSelectedDriverVehicleId(other.id)}
+                                  className="px-2.5 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] transition-colors flex items-center gap-1 shadow-sm"
+                                >
+                                  <Bus className="w-3 h-3" />
+                                  <span>Switch to {other.vehicleNumber} ({other.availableSeats} seats open)</span>
+                                </button>
+                              ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-amber-200/80">
+                            All currently on-duty shuttles are at capacity. Please wait for rides to complete or retry with fewer seats.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1087,9 +1249,9 @@ export default function StudentDashboardPage() {
                   <div className="flex items-start gap-2.5 p-3.5 rounded-2xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-xs animate-fadeIn">
                     <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                     <div className="space-y-1">
-                      <p className="font-semibold text-white">No Shuttle Driver Available Now</p>
+                      <p className="font-semibold text-white">Sorry, no drivers are on duty right now. Please try again later.</p>
                       <p className="text-[11px] text-amber-300/80 leading-relaxed">
-                        All campus shuttle drivers are currently off duty. Seat reservations are paused and will automatically open as soon as a driver signs on duty.
+                        All campus shuttle drivers are currently off duty. Seat reservations will automatically open as soon as a driver comes on duty.
                       </p>
                     </div>
                   </div>
@@ -1099,18 +1261,35 @@ export default function StudentDashboardPage() {
                 <button
                   id="confirm-booking-btn"
                   type="submit"
-                  disabled={submitting || isSameLocation || loadingLocations || activeShuttles.length === 0}
+                  disabled={
+                    submitting ||
+                    hasActiveBooking ||
+                    isSameLocation ||
+                    loadingLocations ||
+                    activeShuttles.length === 0 ||
+                    (selectedShuttle ? selectedShuttle.availableSeats < seatsBooked : false)
+                  }
                   className="w-full py-3.5 px-6 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm transition-all duration-200 shadow-xl shadow-indigo-950/50 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   {submitting ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Reserving Seat...
+                      <span>Reserving Seat...</span>
+                    </>
+                  ) : hasActiveBooking ? (
+                    <>
+                      <Bus className="w-4 h-4 opacity-60" />
+                      <span>Active Booking in Progress</span>
                     </>
                   ) : activeShuttles.length === 0 ? (
                     <>
                       <Bus className="w-4 h-4 opacity-60" />
-                      <span>Reserve Shuttle Seats (No Shuttles on Duty)</span>
+                      <span>Sorry, No Drivers on Duty Right Now</span>
+                    </>
+                  ) : selectedShuttle && selectedShuttle.availableSeats < seatsBooked ? (
+                    <>
+                      <Bus className="w-4 h-4 opacity-60" />
+                      <span>Shuttle Full - Select Another Shuttle</span>
                     </>
                   ) : (
                     <>
